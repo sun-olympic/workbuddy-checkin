@@ -41,6 +41,7 @@ import tempfile
 import plistlib
 import shutil
 import shlex
+import stat
 import urllib.request
 import urllib.error
 import webbrowser
@@ -427,6 +428,10 @@ def _launch_codebuddy_login_and_wait(cli_path):
                 ], cwd=BASE_DIR, stdin=subprocess.PIPE, text=True)
                 process.stdin.write("/login\n")
                 process.stdin.flush()
+                if sys.platform == "win32":
+                    time.sleep(1)
+                    process.stdin.write("\n")
+                    process.stdin.flush()
         except OSError as e:
             if process is not None and process.poll() is None:
                 process.terminate()
@@ -2192,6 +2197,16 @@ def _purge_targets():
 
 def _purge_paths(paths):
     """删除给定运行期路径，返回 (已删除路径, 失败说明)。"""
+    def remove_readonly(function, path, exc_info):
+        error = exc_info[1]
+        if (sys.platform == "win32"
+                and (isinstance(error, PermissionError)
+                     or getattr(error, "winerror", None) == 5)):
+            os.chmod(path, stat.S_IWRITE)
+            function(path)
+            return
+        raise error
+
     removed = []
     failures = []
     for raw_path in paths:
@@ -2200,7 +2215,7 @@ def _purge_paths(paths):
             continue
         try:
             if os.path.isdir(path) and not os.path.islink(path):
-                shutil.rmtree(path)
+                shutil.rmtree(path, onerror=remove_readonly)
             else:
                 os.remove(path)
             removed.append(path)

@@ -400,7 +400,7 @@ class EnvironmentPreflightTest(unittest.TestCase):
         killpg.assert_called_once_with(4242, signal.SIGTERM)
         process.terminate.assert_not_called()
 
-    def test_windows_codebuddy_login_sends_slash_command_over_stdin(self):
+    def test_windows_codebuddy_login_confirms_default_login_method(self):
         process = mock.Mock()
         process.poll.return_value = None
         with mock.patch.object(checkin_cli.sys, "platform", "win32"), \
@@ -410,6 +410,7 @@ class EnvironmentPreflightTest(unittest.TestCase):
                 mock.patch.object(
                     checkin_cli, "_wait_for_codebuddy_login", return_value=True,
                 ), \
+                mock.patch.object(checkin_cli.time, "sleep") as sleep, \
                 redirect_stdout(StringIO()):
             result = checkin_cli._launch_codebuddy_login_and_wait(
                 "C:\\CodeBuddy\\codebuddy.exe"
@@ -421,8 +422,12 @@ class EnvironmentPreflightTest(unittest.TestCase):
         self.assertNotIn("--serve", command)
         self.assertIs(popen.call_args.kwargs["stdin"], checkin_cli.subprocess.PIPE)
         self.assertTrue(popen.call_args.kwargs["text"])
-        process.stdin.write.assert_called_once_with("/login\n")
-        process.stdin.flush.assert_called_once_with()
+        self.assertEqual(
+            process.stdin.write.call_args_list,
+            [mock.call("/login\n"), mock.call("\n")],
+        )
+        self.assertEqual(process.stdin.flush.call_count, 2)
+        sleep.assert_called_once()
 
     def test_main_handles_ctrl_c_without_traceback(self):
         output = StringIO()
@@ -739,6 +744,43 @@ class PurgeUninstallTest(unittest.TestCase):
             self.assertFalse(runtime.exists())
             self.assertTrue(source.exists())
             self.assertEqual(set(removed), {str(config), str(cache), str(runtime)})
+
+    def test_windows_purge_clears_readonly_attribute_and_retries(self):
+        root = r"C:\Users\Administrator\.codebuddy"
+        readonly_file = root + r"\.git\objects\pack\example.idx"
+        retry_remove = mock.Mock()
+        permission_error = PermissionError(5, "拒绝访问", readonly_file)
+
+        def simulate_windows_rmtree(path, onerror=None):
+            self.assertIsNotNone(onerror)
+            onerror(
+                retry_remove,
+                readonly_file,
+                (PermissionError, permission_error, None),
+            )
+
+        with mock.patch.object(checkin_cli.sys, "platform", "win32"), \
+                mock.patch.object(
+                    checkin_cli.os.path, "lexists", return_value=True,
+                ), \
+                mock.patch.object(
+                    checkin_cli.os.path, "isdir", return_value=True,
+                ), \
+                mock.patch.object(
+                    checkin_cli.os.path, "islink", return_value=False,
+                ), \
+                mock.patch.object(
+                    checkin_cli.shutil,
+                    "rmtree",
+                    side_effect=simulate_windows_rmtree,
+                ), \
+                mock.patch.object(checkin_cli.os, "chmod") as chmod:
+            removed, failures = checkin_cli._purge_paths([root])
+
+        self.assertEqual(removed, [root])
+        self.assertEqual(failures, [])
+        chmod.assert_called_once_with(readonly_file, stat.S_IWRITE)
+        retry_remove.assert_called_once_with(readonly_file)
 
     def test_default_purge_targets_exclude_project_source_files(self):
         targets = set(checkin_cli._purge_targets())

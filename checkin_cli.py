@@ -10,6 +10,7 @@ WorkBuddy 签到 · 命令行运行器（CLI）
   python3 checkin_cli.py config   --time 09:10 --wechat <pushplus_token> [--desktop on|off] [--retries 4] [--delay 30]
   python3 checkin_cli.py install                # 注册开机/定时任务（写入 LaunchAgents 并 bootstrap）
   python3 checkin_cli.py uninstall              # 卸载定时任务
+  python3 checkin_cli.py uninstall --purge      # 卸载并彻底删除所有签到运行配置
   python3 checkin_cli.py status                 # 查看当前配置 / 定时 / 注册状态
   python3 checkin_cli.py wx-bind                 # 微信一键绑定：弹出浏览器，除扫码外全自动
   python3 checkin_cli.py run [--dry-run|--force|--no-retry]   # 立即手动跑一次
@@ -24,6 +25,7 @@ WorkBuddy 签到 · 命令行运行器（CLI）
       ② pushplus（第三方聚合）：填入 pushplus.plus 的 token，站点内扫码绑定即可。
       ③ 通用 webhook：填任意服务的 URL（Server酱 / WxPusher / 自建等），适配任意推送。
   - install / uninstall 涉及 launchctl，若在本机终端执行会真正注册；在受限沙箱里会提示手动执行。
+  - 未安装 WorkBuddy 时，向导可安装独立 CodeBuddy CLI 并打开浏览器完成登录。
 """
 
 import os
@@ -54,6 +56,7 @@ WORKBUDDY_APP_CANDIDATES = (
     "/Applications/WorkBuddy.app",
     os.path.expanduser("~/Applications/WorkBuddy.app"),
 )
+CODEBUDDY_NPM_PACKAGE = "@tencent-ai/codebuddy-code"
 
 # 用运行本 CLI 的 python 执行 worker（worker 仅用标准库，任意 python 皆可）
 PY = sys.executable
@@ -171,6 +174,45 @@ def _find_workbuddy_app():
     return next((path for path in WORKBUDDY_APP_CANDIDATES if os.path.isdir(path)), "")
 
 
+def _find_codebuddy_cli():
+    """返回独立 CodeBuddy CLI 路径；不使用 WorkBuddy.app 内嵌副本。"""
+    return shutil.which("codebuddy") or shutil.which("cbc") or ""
+
+
+def _ensure_codebuddy_cli():
+    """确保无 WorkBuddy 模式所需的独立 CodeBuddy CLI 已安装。"""
+    cli_path = _find_codebuddy_cli()
+    if cli_path:
+        print(f"✅ CodeBuddy CLI：{cli_path}")
+        return cli_path
+
+    print("⚠️  未找到独立 CodeBuddy CLI（无 WorkBuddy 模式需要它完成登录）。")
+    npm = shutil.which("npm")
+    if not npm:
+        print("❌ 未找到 npm。请先安装 Node.js 18.20.8+，然后执行：")
+        print(f"   npm install -g {CODEBUDDY_NPM_PACKAGE}")
+        return ""
+    try:
+        answer = input("是否现在自动安装 CodeBuddy CLI？[Y/n]: ").strip().lower()
+    except EOFError:
+        answer = "n"
+    if answer in ("n", "no"):
+        print(f"❌ 已取消。可稍后手动执行：npm install -g {CODEBUDDY_NPM_PACKAGE}")
+        return ""
+
+    print("📦 正在安装独立 CodeBuddy CLI…")
+    result = subprocess.run([npm, "install", "-g", CODEBUDDY_NPM_PACKAGE], check=False)
+    if result.returncode != 0:
+        print("❌ CodeBuddy CLI 安装失败，请根据上方 npm 提示处理后重试。")
+        return ""
+    cli_path = _find_codebuddy_cli()
+    if not cli_path:
+        print("❌ 安装完成但命令不在 PATH 中，请重新打开终端后重试。")
+        return ""
+    print(f"✅ CodeBuddy CLI：{cli_path}")
+    return cli_path
+
+
 def _workbuddy_token_ready():
     """检查 WorkBuddy 是否已产生可用于签到的未过期登录 token。"""
     try:
@@ -182,7 +224,7 @@ def _workbuddy_token_ready():
 
 
 def _wait_for_workbuddy_token(timeout_seconds=180, poll_seconds=2):
-    """等待 WorkBuddy 登录后把有效 token 写入日志。"""
+    """等待 WorkBuddy 或 CodeBuddy CLI 产生有效 token。"""
     deadline = time.monotonic() + timeout_seconds
     while time.monotonic() < deadline:
         if _workbuddy_token_ready():
@@ -191,8 +233,46 @@ def _wait_for_workbuddy_token(timeout_seconds=180, poll_seconds=2):
     return _workbuddy_token_ready()
 
 
+def _launch_codebuddy_login_and_wait(cli_path):
+    """启动独立 CLI 的浏览器登录，并等待其官方登录状态落盘。"""
+    print("🔐 正在启动无 WorkBuddy 登录，浏览器打开后请完成一次扫码/授权。")
+    print("   除浏览器中的登录确认外，无需复制 Token；最多等待 180 秒。")
+    try:
+        process = subprocess.Popen([
+            cli_path,
+            "--print",
+            "--max-turns", "1",
+            "请仅回复 OK",
+        ], cwd=BASE_DIR)
+    except OSError as e:
+        print(f"❌ 无法启动 CodeBuddy CLI：{e}")
+        return False
+
+    try:
+        ready = _wait_for_workbuddy_token()
+    finally:
+        if process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+    if not ready:
+        print("❌ 等待登录超时。请确认浏览器授权成功后重试。")
+        return False
+    print("✅ 登录态：已从 CodeBuddy CLI 获取有效 token")
+    print("✅ 环境预检通过。\n")
+    return True
+
+
+def _run_codebuddy_preflight():
+    """完成无 WorkBuddy 模式的 CLI 安装与登录检查。"""
+    cli_path = _ensure_codebuddy_cli()
+    return bool(cli_path and _launch_codebuddy_login_and_wait(cli_path))
+
+
 def _run_environment_preflight():
-    """配置/安装前检查运行环境，必要时自动启动 WorkBuddy。"""
+    """配置/安装前检查环境，可选择 WorkBuddy 或独立 CLI 登录。"""
     print("=== 环境预检 ===")
     if sys.platform != "darwin":
         print("❌ 当前仅支持 macOS。")
@@ -204,25 +284,30 @@ def _run_environment_preflight():
         return False
     print(f"✅ Python：{sys.version_info.major}.{sys.version_info.minor}")
 
-    app_path = _find_workbuddy_app()
-    if not app_path:
-        print("❌ 未找到 WorkBuddy.app，请先安装 WorkBuddy。")
-        return False
-    print(f"✅ WorkBuddy：{app_path}")
-
     if _workbuddy_token_ready():
         print("✅ 登录态：已找到有效 token")
         print("✅ 环境预检通过。\n")
         return True
 
+    app_path = _find_workbuddy_app()
+    if not app_path:
+        print("ℹ️  未安装 WorkBuddy，自动进入“无 WorkBuddy 模式”。")
+        return _run_codebuddy_preflight()
+
+    print(f"✅ WorkBuddy：{app_path}")
+
     print("⚠️  未找到有效登录 token。")
-    print("   可由向导自动启动 WorkBuddy；若尚未登录，只需在 WorkBuddy 完成登录。")
+    print("请选择登录方式：")
+    print("   1) 启动 WorkBuddy 登录")
+    print("   2) 无 WorkBuddy 模式（独立 CodeBuddy CLI + 浏览器登录）")
     try:
-        answer = input("是否自动启动 WorkBuddy 并等待登录态？[Y/n]: ").strip().lower()
+        answer = input("请选择 [1]: ").strip()
     except EOFError:
-        answer = "n"
-    if answer in ("n", "no"):
-        print("❌ 已取消；没有 WorkBuddy 登录态无法执行签到。")
+        answer = "1"
+    if answer == "2":
+        return _run_codebuddy_preflight()
+    if answer not in ("", "1"):
+        print("❌ 无效选择，已取消环境预检。")
         return False
 
     launched = subprocess.run(["open", app_path], check=False, capture_output=True)

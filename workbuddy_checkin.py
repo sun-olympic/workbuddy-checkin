@@ -4,11 +4,10 @@
 WorkBuddy 每日签到脚本（HTTP 直连版，macOS）
 ============================================
 原理：
-    1. 从 WorkBuddy 本机日志（~/.workbuddy/logs）里提取登录态的 Bearer token
-       （WorkBuddy 的 HTTP 请求日志会把完整 Authorization 头落盘）。
+    1. 从 WorkBuddy 本机日志或独立 CodeBuddy CLI 的官方登录状态中读取 Bearer token。
     2. 直接调用云端签到接口完成签到，无需 GUI、无需辅助功能授权、无需坐标校准。
-    3. 因为全程是后台 HTTP 请求，所以「锁屏 / 睡眠 / 未开窗口」都能照常执行，
-       只要曾经登录过 WorkBuddy（日志里有有效 token）即可。
+    3. 因为全程是后台 HTTP 请求，所以「锁屏 / 未开窗口」也能执行；只要
+       WorkBuddy 或 CodeBuddy CLI 中仍有有效登录态即可。
 
 接口（逆向自 WorkBuddy.app 的 app.asar）：
     POST https://copilot.tencent.com/billing/meter/checkin-status   # 查状态
@@ -51,6 +50,12 @@ import ssl
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 LOGS_DIR = os.path.expanduser("~/.workbuddy/logs")
+CODEBUDDY_AUTH_PATHS = (
+    os.path.expanduser(
+        "~/Library/Application Support/CodeBuddyExtension/Data/Public/auth/"
+        "workbuddy-desktop.info"
+    ),
+)
 LOG_PATH = os.path.join(BASE_DIR, "checkin.log")
 CONFIG_PATH = os.path.join(BASE_DIR, "checkin_config.json")
 
@@ -106,14 +111,32 @@ def _b64decode(seg: str) -> dict:
 
 def extract_token():
     """
-    从 WorkBuddy 主线程日志提取最新且未过期的 Bearer token。
+    从 CodeBuddy CLI 登录状态或 WorkBuddy 主线程日志提取最新有效 token。
     返回 (token, uid)，找不到返回 None。
     """
     jwt_re = re.compile(r'Bearer\s+(eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+)')
     now = datetime.datetime.now(datetime.timezone.utc).timestamp()
     best = None  # (exp, token, uid)
+
+    # 独立 CodeBuddy CLI 与 WorkBuddy 使用同一个 authentication id
+    #（workbuddy-desktop）。优先读取它维护的官方登录状态，不复制凭证到项目配置。
+    for auth_path in CODEBUDDY_AUTH_PATHS:
+        try:
+            with open(auth_path, "r", encoding="utf-8") as auth_file:
+                state = json.load(auth_file)
+            token = str((state.get("auth") or {}).get("accessToken") or "").strip()
+            if not token:
+                continue
+            payload = _b64decode(token.split(".")[1])
+            exp = float(payload.get("exp") or 0)
+            uid = payload.get("sub") or (state.get("account") or {}).get("uid")
+            if exp > now and uid and (best is None or exp > best[0]):
+                best = (exp, token, uid)
+        except (OSError, ValueError, TypeError, KeyError, IndexError, json.JSONDecodeError):
+            continue
+
     if not os.path.isdir(LOGS_DIR):
-        return None
+        return (best[1], best[2]) if best else None
     for root, _, files in os.walk(LOGS_DIR):
         for fn in files:
             if not fn.startswith("workbuddyMainThread"):
@@ -372,9 +395,9 @@ def do_checkin(dry_run=False, force=False):
     """
     tok_uid = extract_token()
     if not tok_uid:
-        logger.error("未找到有效 Bearer token（WorkBuddy 可能从未登录/无日志）")
-        print("❌ 未能从 ~/.workbuddy/logs 提取到有效登录 token。")
-        print("   请确认 WorkBuddy 已登录并至少运行过一次（产生请求日志）。")
+        logger.error("未找到有效 Bearer token（WorkBuddy/CodeBuddy CLI 均无有效登录态）")
+        print("❌ 未找到有效登录 token。")
+        print("   请运行 checkin_cli.py wizard，选择 WorkBuddy 或无 WorkBuddy 登录模式。")
         return False, False, "failed"
     token, uid = tok_uid
     logger.info("提取 token 成功: uid=%s token_len=%d", uid, len(token))

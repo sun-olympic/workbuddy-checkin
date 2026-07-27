@@ -1,14 +1,15 @@
 # WorkBuddy 自动签到（macOS）
 
-通过 WorkBuddy HTTP 接口每日自动签到，无需打开 WorkBuddy 窗口或授予辅助功能权限。支持 macOS 通知、微信测试号、pushplus 和 webhook。
+通过 WorkBuddy HTTP 接口每日自动签到，无需保持 WorkBuddy 窗口运行或授予辅助功能权限，也支持完全不安装 WorkBuddy。支持 macOS 通知、微信测试号、pushplus 和 webhook。
 
 ## 环境预检
 
-`wizard` 和 `install` 会先检查 macOS、Python 3.8+、WorkBuddy.app 和有效登录 token。如果 WorkBuddy 从未启动或尚未产生 token，向导会自动启动 WorkBuddy 并等待最多 180 秒：
+`wizard` 和 `install` 会先检查 macOS、Python 3.8+ 和有效登录态。没有登录态时可选择：
 
-- 本机已登录 WorkBuddy：通常无需手动操作。
-- 首次使用：只需在自动打开的 WorkBuddy 中完成登录。
-- 没有有效登录态时无法零交互签到，因为签到接口必须携带 WorkBuddy Bearer token。
+- **WorkBuddy 模式**：自动打开已安装的 WorkBuddy，等待登录完成。
+- **无 WorkBuddy 模式**：使用独立 CodeBuddy CLI 打开浏览器登录；未安装 CLI 时，向导可通过 npm 自动安装。
+
+两种模式都只需首次完成一次扫码/授权。脚本直接读取官方登录状态，不会把登录 Token 复制到项目配置。完全免登录不可行，因为签到接口必须携带有效凭证。
 
 自动绑定微信时建议已安装 Chrome；Playwright 会自动安装到项目专用环境。
 
@@ -29,6 +30,21 @@ python3 checkin_cli.py status
 ```
 
 `config` 不带参数时与 `wizard` 等价。状态中必须显示“定时注册状态：已注册”，否则到点不会执行。
+
+## 无 WorkBuddy 模式
+
+```bash
+python3 checkin_cli.py wizard
+```
+
+未检测到 WorkBuddy 时会自动进入无 WorkBuddy 模式；已安装 WorkBuddy 时，在登录方式中选择 `2`。向导会：
+
+1. 检查独立 CodeBuddy CLI。
+2. 如未安装，询问后自动执行 `npm install -g @tencent-ai/codebuddy-code`。
+3. 打开浏览器，等待用户完成一次扫码/授权。
+4. 获取有效登录态后继续配置。
+
+此模式需要 Node.js 18.20.8+ 和 npm，但不需要安装或运行 WorkBuddy。
 
 ## 绑定微信
 
@@ -78,6 +94,18 @@ python3 checkin_cli.py wx-bind --mode manual
 | 彻底清理运行数据 | `python3 checkin_cli.py uninstall --purge` |
 
 彻底清理会删除配置、微信凭证/token 缓存、plist、日志、截图、Python/测试缓存和 Playwright 专用环境；项目源码保留。
+
+## 删除定时任务
+
+```bash
+# 仅删除定时任务，保留配置
+python3 checkin_cli.py uninstall
+
+# 删除定时任务并彻底清理所有签到相关配置
+python3 checkin_cli.py uninstall --purge
+```
+
+彻底清理不会删除独立 CodeBuddy CLI 及其账号登录状态，以免影响 CodeBuddy 的正常使用。
 
 ## 命令行配置示例
 

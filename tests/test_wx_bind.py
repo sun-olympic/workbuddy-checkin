@@ -1,7 +1,10 @@
 import importlib.util
+import base64
+import json
 import pathlib
 import stat
 import tempfile
+import time
 import unittest
 from contextlib import redirect_stdout
 from io import StringIO
@@ -276,15 +279,49 @@ class EnvironmentPreflightTest(unittest.TestCase):
         )
         wait.assert_called_once()
 
-    def test_missing_workbuddy_app_fails_preflight(self):
+    def test_missing_workbuddy_app_uses_standalone_codebuddy_login(self):
         preflight = getattr(checkin_cli, "_run_environment_preflight", None)
         self.assertIsNotNone(preflight)
         with mock.patch.object(checkin_cli.sys, "platform", "darwin"), \
+                mock.patch.object(checkin_cli, "_workbuddy_token_ready", return_value=False), \
                 mock.patch.object(checkin_cli, "_find_workbuddy_app", return_value=""), \
+                mock.patch.object(
+                    checkin_cli, "_ensure_codebuddy_cli",
+                    return_value="/usr/local/bin/codebuddy", create=True,
+                ), \
+                mock.patch.object(
+                    checkin_cli, "_launch_codebuddy_login_and_wait",
+                    return_value=True, create=True,
+                ) as login, \
                 redirect_stdout(StringIO()):
             result = preflight()
 
-        self.assertFalse(result)
+        self.assertTrue(result)
+        login.assert_called_once_with("/usr/local/bin/codebuddy")
+
+    def test_user_can_choose_no_workbuddy_mode_when_app_is_installed(self):
+        with mock.patch.object(checkin_cli.sys, "platform", "darwin"), \
+                mock.patch.object(checkin_cli, "_workbuddy_token_ready", return_value=False), \
+                mock.patch.object(
+                    checkin_cli, "_find_workbuddy_app",
+                    return_value="/Applications/WorkBuddy.app",
+                ), \
+                mock.patch.object(
+                    checkin_cli, "_ensure_codebuddy_cli",
+                    return_value="/opt/homebrew/bin/codebuddy", create=True,
+                ), \
+                mock.patch.object(
+                    checkin_cli, "_launch_codebuddy_login_and_wait",
+                    return_value=True, create=True,
+                ) as login, \
+                mock.patch("builtins.input", return_value="2"), \
+                mock.patch.object(checkin_cli.subprocess, "run") as workbuddy_launch, \
+                redirect_stdout(StringIO()):
+            result = checkin_cli._run_environment_preflight()
+
+        self.assertTrue(result)
+        login.assert_called_once_with("/opt/homebrew/bin/codebuddy")
+        workbuddy_launch.assert_not_called()
 
     def test_wizard_stops_before_writing_when_preflight_fails(self):
         with mock.patch.object(
@@ -390,6 +427,41 @@ class PurgeUninstallTest(unittest.TestCase):
 
 
 class WxBindingVerificationTest(unittest.TestCase):
+    @staticmethod
+    def _jwt(exp, sub="codebuddy-user"):
+        def segment(value):
+            raw = json.dumps(value, separators=(",", ":")).encode()
+            return base64.urlsafe_b64encode(raw).decode().rstrip("=")
+
+        return f"{segment({'alg': 'none'})}.{segment({'exp': exp, 'sub': sub})}.signature"
+
+    def test_codebuddy_auth_file_provides_token_without_workbuddy_logs(self):
+        with tempfile.TemporaryDirectory() as directory:
+            auth_path = pathlib.Path(directory) / "workbuddy-desktop.info"
+            token = self._jwt(int(time.time()) + 3600)
+            auth_path.write_text(json.dumps({
+                "account": {"uid": "codebuddy-user"},
+                "auth": {"accessToken": token},
+            }))
+            with mock.patch.object(worker, "LOGS_DIR", str(pathlib.Path(directory) / "missing")), \
+                    mock.patch.object(worker, "CODEBUDDY_AUTH_PATHS", (str(auth_path),), create=True):
+                result = worker.extract_token()
+
+        self.assertEqual(result, (token, "codebuddy-user"))
+
+    def test_expired_codebuddy_auth_token_is_ignored(self):
+        with tempfile.TemporaryDirectory() as directory:
+            auth_path = pathlib.Path(directory) / "workbuddy-desktop.info"
+            auth_path.write_text(json.dumps({
+                "account": {"uid": "codebuddy-user"},
+                "auth": {"accessToken": self._jwt(int(time.time()) - 60)},
+            }))
+            with mock.patch.object(worker, "LOGS_DIR", str(pathlib.Path(directory) / "missing")), \
+                    mock.patch.object(worker, "CODEBUDDY_AUTH_PATHS", (str(auth_path),), create=True):
+                result = worker.extract_token()
+
+        self.assertIsNone(result)
+
     def test_default_wechat_template_data_matches_time_first_card_style(self):
         data = worker._default_wx_test_data(
             "🎉 WorkBuddy 签到成功",

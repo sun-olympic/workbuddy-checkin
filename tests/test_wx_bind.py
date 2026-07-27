@@ -128,6 +128,10 @@ class WxBindHelpersTest(unittest.TestCase):
         answers = ["", "", "", "", "1", "1", ""]
         output = StringIO()
         with mock.patch("builtins.input", side_effect=answers), \
+                mock.patch.object(
+                    checkin_cli, "_run_environment_preflight",
+                    return_value=True, create=True,
+                ), \
                 mock.patch.object(checkin_cli, "write_config") as write_config, \
                 mock.patch.object(checkin_cli, "write_plist", return_value="test.plist"), \
                 mock.patch.object(checkin_cli, "cmd_wx_bind", return_value=0) as bind, \
@@ -144,6 +148,10 @@ class WxBindHelpersTest(unittest.TestCase):
     def test_wizard_can_choose_manual_wechat_binding(self):
         answers = ["", "", "", "", "1", "2", ""]
         with mock.patch("builtins.input", side_effect=answers), \
+                mock.patch.object(
+                    checkin_cli, "_run_environment_preflight",
+                    return_value=True, create=True,
+                ), \
                 mock.patch.object(checkin_cli, "write_config"), \
                 mock.patch.object(checkin_cli, "write_plist", return_value="test.plist"), \
                 mock.patch.object(checkin_cli, "cmd_wx_bind", return_value=0) as bind, \
@@ -206,6 +214,10 @@ class WxBindHelpersTest(unittest.TestCase):
     def test_wizard_system_notification_is_independent_from_remote_choice(self):
         answers = ["", "off", "", "", "4", ""]
         with mock.patch("builtins.input", side_effect=answers), \
+                mock.patch.object(
+                    checkin_cli, "_run_environment_preflight",
+                    return_value=True, create=True,
+                ), \
                 mock.patch.object(checkin_cli, "write_config") as write_config, \
                 mock.patch.object(checkin_cli, "write_plist", return_value="test.plist"), \
                 mock.patch.object(checkin_cli, "cmd_wx_bind") as bind, \
@@ -217,6 +229,97 @@ class WxBindHelpersTest(unittest.TestCase):
         self.assertEqual(saved["notify_channel"], "none")
         self.assertFalse(saved["desktop_notify"])
         bind.assert_not_called()
+
+
+class EnvironmentPreflightTest(unittest.TestCase):
+    def test_ready_environment_passes_without_opening_workbuddy(self):
+        preflight = getattr(checkin_cli, "_run_environment_preflight", None)
+        self.assertIsNotNone(preflight)
+        with mock.patch.object(checkin_cli.sys, "platform", "darwin"), \
+                mock.patch.object(
+                    checkin_cli, "_find_workbuddy_app",
+                    return_value="/Applications/WorkBuddy.app",
+                ), \
+                mock.patch.object(checkin_cli, "_workbuddy_token_ready", return_value=True), \
+                mock.patch.object(checkin_cli.subprocess, "run") as launch, \
+                redirect_stdout(StringIO()):
+            result = preflight()
+
+        self.assertTrue(result)
+        launch.assert_not_called()
+
+    def test_missing_token_can_open_workbuddy_and_wait_until_ready(self):
+        preflight = getattr(checkin_cli, "_run_environment_preflight", None)
+        self.assertIsNotNone(preflight)
+        with mock.patch.object(checkin_cli.sys, "platform", "darwin"), \
+                mock.patch.object(
+                    checkin_cli, "_find_workbuddy_app",
+                    return_value="/Applications/WorkBuddy.app",
+                ), \
+                mock.patch.object(checkin_cli, "_workbuddy_token_ready", return_value=False), \
+                mock.patch.object(
+                    checkin_cli, "_wait_for_workbuddy_token", return_value=True,
+                ) as wait, \
+                mock.patch.object(
+                    checkin_cli.subprocess, "run",
+                    return_value=mock.Mock(returncode=0),
+                ) as launch, \
+                mock.patch("builtins.input", return_value=""), \
+                redirect_stdout(StringIO()):
+            result = preflight()
+
+        self.assertTrue(result)
+        launch.assert_called_once_with(
+            ["open", "/Applications/WorkBuddy.app"],
+            check=False,
+            capture_output=True,
+        )
+        wait.assert_called_once()
+
+    def test_missing_workbuddy_app_fails_preflight(self):
+        preflight = getattr(checkin_cli, "_run_environment_preflight", None)
+        self.assertIsNotNone(preflight)
+        with mock.patch.object(checkin_cli.sys, "platform", "darwin"), \
+                mock.patch.object(checkin_cli, "_find_workbuddy_app", return_value=""), \
+                redirect_stdout(StringIO()):
+            result = preflight()
+
+        self.assertFalse(result)
+
+    def test_wizard_stops_before_writing_when_preflight_fails(self):
+        with mock.patch.object(
+                    checkin_cli, "_run_environment_preflight",
+                    return_value=False, create=True,
+                ), \
+                mock.patch("builtins.input", side_effect=["", "", "", "", "4", ""]), \
+                mock.patch.object(checkin_cli, "write_config") as write_config, \
+                mock.patch.object(
+                    checkin_cli, "write_plist", return_value="test.plist",
+                ) as write_plist, \
+                redirect_stdout(StringIO()):
+            result = checkin_cli.interactive_config({})
+
+        self.assertEqual(result, 1)
+        write_config.assert_not_called()
+        write_plist.assert_not_called()
+
+    def test_install_stops_when_preflight_fails(self):
+        with mock.patch.object(
+                    checkin_cli, "_run_environment_preflight",
+                    return_value=False, create=True,
+                ), \
+                mock.patch.object(
+                    checkin_cli, "write_plist", return_value="test.plist",
+                ) as write_plist, \
+                mock.patch.object(
+                    checkin_cli, "install", return_value=(True, "installed"),
+                ) as install, \
+                redirect_stdout(StringIO()):
+            result = checkin_cli.cmd_install(None)
+
+        self.assertEqual(result, 1)
+        write_plist.assert_not_called()
+        install.assert_not_called()
 
 
 class PurgeUninstallTest(unittest.TestCase):

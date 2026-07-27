@@ -13,6 +13,43 @@
 
 自动绑定微信时建议已安装 Chrome；Playwright 会自动安装到项目专用环境。
 
+## 未安装 Python
+
+先检查 Python 版本。本项目要求 Python 3.8 或更高版本。
+
+### macOS
+
+```bash
+python3 --version
+```
+
+若提示找不到命令，推荐使用 Homebrew 安装：
+
+```bash
+brew install python3
+python3 --version
+```
+
+没有 Homebrew 时，可直接使用 [Python macOS 官方安装器](https://www.python.org/downloads/macos/)。安装完成后重新打开终端，再执行 `python3 --version`。不要删除或修改 macOS 自带的 `/usr/bin/python3`。
+
+### Windows
+
+在 PowerShell 中检查：
+
+```powershell
+python --version
+```
+
+若提示找不到命令，使用 WinGet 安装 Python Install Manager，再安装默认的稳定版 Python：
+
+```powershell
+winget install 9NQ7512CXL7T -e --accept-package-agreements --disable-interactivity
+py install default
+python --version
+```
+
+如果没有 `winget`，请使用 [Python Windows 官方安装说明](https://docs.python.org/3/using/windows.html) 中的安装包。安装完成后若命令仍不可用，关闭并重新打开 PowerShell。后续命令在 Windows 使用 `python`，在 macOS 使用 `python3`。
+
 ## 快速开始
 
 ```bash

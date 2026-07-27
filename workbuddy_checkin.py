@@ -50,11 +50,16 @@ import ssl
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 LOGS_DIR = os.path.expanduser("~/.workbuddy/logs")
-CODEBUDDY_AUTH_PATHS = (
+CODEBUDDY_AUTH_FILENAMES = (
+    "Tencent-Cloud.coding-copilot.info",
+    "workbuddy-desktop.info",
+)
+CODEBUDDY_AUTH_PATHS = tuple(
     os.path.expanduser(
         "~/Library/Application Support/CodeBuddyExtension/Data/Public/auth/"
-        "workbuddy-desktop.info"
-    ),
+        + filename
+    )
+    for filename in CODEBUDDY_AUTH_FILENAMES
 )
 LOG_PATH = os.path.join(BASE_DIR, "checkin.log")
 CONFIG_PATH = os.path.join(BASE_DIR, "checkin_config.json")
@@ -116,11 +121,13 @@ def _codebuddy_auth_paths():
         local_app_data = os.environ.get("LOCALAPPDATA") or os.path.expanduser(
             "~/AppData/Local"
         )
-        paths.append(os.path.join(
-            local_app_data,
-            "CodeBuddyExtension", "Data", "Public", "auth",
-            "workbuddy-desktop.info",
-        ))
+        paths.extend(
+            os.path.join(
+                local_app_data,
+                "CodeBuddyExtension", "Data", "Public", "auth", filename,
+            )
+            for filename in CODEBUDDY_AUTH_FILENAMES
+        )
     return tuple(dict.fromkeys(paths))
 
 

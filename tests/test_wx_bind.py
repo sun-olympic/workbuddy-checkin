@@ -580,6 +580,13 @@ class PurgeUninstallTest(unittest.TestCase):
             ),
             targets,
         )
+        self.assertIn(
+            checkin_cli.os.path.expanduser(
+                "~/Library/Application Support/CodeBuddyExtension/Data/Public/"
+                "auth/Tencent-Cloud.coding-copilot.info"
+            ),
+            targets,
+        )
 
     def test_codebuddy_purge_rejects_unsafe_custom_config_directory(self):
         with mock.patch.dict(
@@ -763,6 +770,13 @@ class WindowsSupportTest(unittest.TestCase):
             ),
             paths,
         )
+        self.assertIn(
+            worker.os.path.join(
+                local_app_data, "CodeBuddyExtension", "Data", "Public", "auth",
+                "Tencent-Cloud.coding-copilot.info",
+            ),
+            paths,
+        )
 
     def test_windows_desktop_notification_uses_powershell(self):
         with mock.patch.object(worker.sys, "platform", "win32"), \
@@ -800,6 +814,18 @@ class WxBindingVerificationTest(unittest.TestCase):
                 result = worker.extract_token()
 
         self.assertEqual(result, (token, "codebuddy-user"))
+
+    def test_current_macos_codebuddy_auth_filename_is_discovered(self):
+        with mock.patch.object(worker.sys, "platform", "darwin"):
+            paths = worker._codebuddy_auth_paths()
+
+        self.assertIn(
+            worker.os.path.expanduser(
+                "~/Library/Application Support/CodeBuddyExtension/Data/Public/"
+                "auth/Tencent-Cloud.coding-copilot.info"
+            ),
+            paths,
+        )
 
     def test_expired_codebuddy_auth_token_is_ignored(self):
         with tempfile.TemporaryDirectory() as directory:

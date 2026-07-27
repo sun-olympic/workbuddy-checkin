@@ -62,6 +62,10 @@ WORKBUDDY_APP_CANDIDATES = (
     os.path.expanduser("~/Applications/WorkBuddy.app"),
 )
 CODEBUDDY_NPM_PACKAGE = "@tencent-ai/codebuddy-code"
+CODEBUDDY_AUTH_FILENAMES = (
+    "Tencent-Cloud.coding-copilot.info",
+    "workbuddy-desktop.info",
+)
 
 # 用运行本 CLI 的 python 执行 worker（worker 仅用标准库，任意 python 皆可）
 PY = sys.executable
@@ -2202,21 +2206,27 @@ def _codebuddy_purge_targets():
         targets.extend([
             os.path.join(local_app_data, "codebuddy"),
             os.path.join(app_data, "CodeBuddy Code"),
+        ])
+        targets.extend(
             os.path.join(
                 local_app_data, "CodeBuddyExtension", "Data", "Public",
-                "auth", "workbuddy-desktop.info",
-            ),
-        ])
+                "auth", filename,
+            )
+            for filename in CODEBUDDY_AUTH_FILENAMES
+        )
     else:
         targets.extend([
             os.path.join(home, ".local", "bin", name)
             for name in ("codebuddy", "cbc", "codebuddy-code", "cbc-prewarm")
         ])
         if sys.platform == "darwin":
-            targets.append(os.path.join(
-                home, "Library", "Application Support", "CodeBuddyExtension",
-                "Data", "Public", "auth", "workbuddy-desktop.info",
-            ))
+            targets.extend(
+                os.path.join(
+                    home, "Library", "Application Support", "CodeBuddyExtension",
+                    "Data", "Public", "auth", filename,
+                )
+                for filename in CODEBUDDY_AUTH_FILENAMES
+            )
     return list(dict.fromkeys(targets))
 
 

@@ -155,6 +155,14 @@ def _platform_adapter():
     return get_platform(sys.platform, _scheduler_settings())
 
 
+def _configure_console():
+    """在命令输出前完成当前平台的终端编码配置。"""
+    try:
+        _platform_adapter().configure_console()
+    except UnsupportedPlatformError:
+        pass
+
+
 def schedule_installed():
     """返回当前平台的定时任务是否完整注册。"""
     return _platform_adapter().schedule_installed(_run)
@@ -2295,6 +2303,7 @@ def build_parser():
 
 
 def main():
+    _configure_console()
     parser = build_parser()
     args = parser.parse_args()
     if not getattr(args, "cmd", None):

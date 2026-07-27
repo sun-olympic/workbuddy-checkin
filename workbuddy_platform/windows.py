@@ -6,6 +6,7 @@ import shutil
 import stat
 import subprocess
 import socket
+import sys
 import time
 import urllib.error
 import urllib.request
@@ -24,6 +25,29 @@ class WindowsPlatform:
         if self.scheduler is None:
             raise RuntimeError("scheduler settings are required")
         return self.scheduler
+
+    def configure_console(self, stdout=None, stderr=None, kernel32=None):
+        """统一 Windows 控制台与 Python 流的 UTF-8 编码。"""
+        stdout = sys.stdout if stdout is None else stdout
+        stderr = sys.stderr if stderr is None else stderr
+        if kernel32 is None:
+            try:
+                import ctypes
+                kernel32 = ctypes.windll.kernel32
+            except (AttributeError, OSError):
+                kernel32 = None
+        if kernel32 is not None:
+            try:
+                kernel32.SetConsoleOutputCP(65001)
+                kernel32.SetConsoleCP(65001)
+            except (AttributeError, OSError):
+                pass
+        for stream in (stdout, stderr):
+            if stream is not None and hasattr(stream, "reconfigure"):
+                try:
+                    stream.reconfigure(encoding="utf-8", errors="replace")
+                except (AttributeError, OSError, ValueError):
+                    pass
 
     def prepare_schedule(self, hour, minute, write_plist):
         del hour, minute, write_plist

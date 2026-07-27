@@ -988,6 +988,26 @@ class PurgeUninstallTest(unittest.TestCase):
 
 
 class WindowsSupportTest(unittest.TestCase):
+    def test_cli_console_setup_delegates_to_platform_adapter(self):
+        platform = mock.Mock()
+
+        with mock.patch.object(
+            checkin_cli, "_platform_adapter", return_value=platform,
+        ):
+            checkin_cli._configure_console()
+
+        platform.configure_console.assert_called_once_with()
+
+    def test_worker_console_setup_delegates_to_platform_adapter(self):
+        platform = mock.Mock()
+
+        with mock.patch.object(
+            worker, "_platform_adapter", return_value=platform,
+        ):
+            worker._configure_console()
+
+        platform.configure_console.assert_called_once_with()
+
     def test_windows_install_creates_daily_and_logon_tasks(self):
         action = checkin_cli.subprocess.list2cmdline([
             checkin_cli.PY, checkin_cli.WORKER,

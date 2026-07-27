@@ -112,6 +112,26 @@ class WindowsPlatformTest(unittest.TestCase):
             )
         )
 
+    def test_console_uses_utf8_code_page_and_stream_encoding(self):
+        stdout = mock.Mock()
+        stderr = mock.Mock()
+        kernel32 = mock.Mock()
+
+        self.platform.configure_console(
+            stdout=stdout,
+            stderr=stderr,
+            kernel32=kernel32,
+        )
+
+        kernel32.SetConsoleOutputCP.assert_called_once_with(65001)
+        kernel32.SetConsoleCP.assert_called_once_with(65001)
+        stdout.reconfigure.assert_called_once_with(
+            encoding="utf-8", errors="replace",
+        )
+        stderr.reconfigure.assert_called_once_with(
+            encoding="utf-8", errors="replace",
+        )
+
 
 class MacOSPlatformTest(unittest.TestCase):
     def test_scheduler_prepare_is_owned_by_macos_adapter(self):

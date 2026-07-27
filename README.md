@@ -240,9 +240,15 @@ python3 checkin_cli.py config \
 
 ## 排查
 
-1. 运行 `python3 checkin_cli.py status`，确认配置、微信绑定和定时注册均正常。
-2. 运行 `python3 checkin_cli.py test-notify` 验证通知链路。
+1. 运行状态检查：macOS 使用 `python3 checkin_cli.py status`，Windows 使用 `python checkin_cli.py status`。
+2. 用同样的 Python 命令执行 `checkin_cli.py test-notify` 验证通知链路。
 3. 查看 `checkin.log`、`launchd.out.log` 和 `launchd.err.log`。
 4. 扫码页空白时，关闭代理/VPN 或切换网络，并使用手机微信扫码后确认登录。
+
+Windows PowerShell 查看 UTF-8 日志时使用：
+
+```powershell
+Get-Content -Encoding UTF8 .\checkin.log
+```
 
 本项目不使用微信个人号协议，避免封号风险。

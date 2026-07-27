@@ -17,6 +17,9 @@ class MacOSPlatform:
             raise RuntimeError("scheduler settings are required")
         return self.scheduler
 
+    def configure_console(self):
+        """macOS 终端默认使用 UTF-8，无需调整。"""
+
     def prepare_schedule(self, hour, minute, write_plist):
         return write_plist(hour, minute)
 

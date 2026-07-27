@@ -81,6 +81,14 @@ def _platform_adapter():
     return get_platform(sys.platform)
 
 
+def _configure_console():
+    """在日志和控制台输出前统一当前平台编码。"""
+    try:
+        _platform_adapter().configure_console()
+    except UnsupportedPlatformError:
+        pass
+
+
 # ------------------------- 配置 -------------------------
 def load_config():
     """读取 checkin_config.json（不存在则用默认）。可配置项：
@@ -514,6 +522,7 @@ def build_test_message():
 
 
 def main():
+    _configure_console()
     args = sys.argv[1:]
     dry = "--dry-run" in args
     force = "--force" in args

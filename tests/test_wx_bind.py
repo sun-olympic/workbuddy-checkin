@@ -3,6 +3,7 @@ import base64
 import json
 import pathlib
 import signal
+import socket
 import stat
 import sys
 import tempfile
@@ -300,6 +301,19 @@ class WxBindHelpersTest(unittest.TestCase):
 
 
 class EnvironmentPreflightTest(unittest.TestCase):
+    class _JsonResponse:
+        def __init__(self, payload):
+            self.payload = payload
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc_value, traceback):
+            return False
+
+        def read(self):
+            return json.dumps(self.payload).encode("utf-8")
+
     def test_codebuddy_login_settings_skip_folder_trust_and_register_hook(self):
         settings = json.loads(checkin_cli._codebuddy_login_settings(
             "/tmp/workbuddy login.done"
@@ -400,17 +414,53 @@ class EnvironmentPreflightTest(unittest.TestCase):
         killpg.assert_called_once_with(4242, signal.SIGTERM)
         process.terminate.assert_not_called()
 
-    def test_windows_codebuddy_login_confirms_default_login_method(self):
+    def test_windows_codebuddy_login_uses_web_ui_and_opens_auth_url(self):
+        responses = [
+            self._JsonResponse({
+                "data": {
+                    "authenticated": False,
+                    "loginMethods": [
+                        {"id": "internal", "label": "国内站点登录"},
+                        {"id": "external", "label": "国际站点登录"},
+                    ],
+                },
+            }),
+            self._JsonResponse({
+                "data": {
+                    "success": True,
+                    "authUrl": "https://copilot.tencent.com/auth/test",
+                },
+            }),
+        ]
         process = mock.Mock()
+        process.pid = 4242
         process.poll.return_value = None
+        socket_context = mock.MagicMock()
+        socket_context.__enter__.return_value.getsockname.return_value = (
+            "127.0.0.1", 54321,
+        )
         with mock.patch.object(checkin_cli.sys, "platform", "win32"), \
+                mock.patch.object(
+                    socket, "socket", return_value=socket_context,
+                ), \
                 mock.patch.object(
                     checkin_cli.subprocess, "Popen", return_value=process,
                 ) as popen, \
                 mock.patch.object(
+                    checkin_cli.urllib.request,
+                    "urlopen",
+                    side_effect=responses,
+                ) as urlopen, \
+                mock.patch.object(
                     checkin_cli, "_wait_for_codebuddy_login", return_value=True,
                 ), \
-                mock.patch.object(checkin_cli.time, "sleep") as sleep, \
+                mock.patch.object(
+                    checkin_cli.os, "startfile", create=True,
+                ) as startfile, \
+                mock.patch.object(
+                    checkin_cli, "_run", return_value=(0, "", ""),
+                ) as run, \
+                mock.patch.object(checkin_cli.time, "sleep"), \
                 redirect_stdout(StringIO()):
             result = checkin_cli._launch_codebuddy_login_and_wait(
                 "C:\\CodeBuddy\\codebuddy.exe"
@@ -418,16 +468,29 @@ class EnvironmentPreflightTest(unittest.TestCase):
 
         self.assertTrue(result)
         command = popen.call_args.args[0]
-        self.assertNotIn("/login", command)
-        self.assertNotIn("--serve", command)
-        self.assertIs(popen.call_args.kwargs["stdin"], checkin_cli.subprocess.PIPE)
-        self.assertTrue(popen.call_args.kwargs["text"])
+        self.assertIn("--serve", command)
+        self.assertIn("--host", command)
+        self.assertIn("127.0.0.1", command)
+        self.assertIn("--port", command)
+        self.assertIn("54321", command)
+        self.assertNotIn("stdin", popen.call_args.kwargs)
+        status_request = urlopen.call_args_list[0].args[0]
+        login_request = urlopen.call_args_list[1].args[0]
+        self.assertEqual(status_request.get_method(), "GET")
         self.assertEqual(
-            process.stdin.write.call_args_list,
-            [mock.call("/login\n"), mock.call("\r")],
+            status_request.get_header("X-codebuddy-request"), "1",
         )
-        self.assertEqual(process.stdin.flush.call_count, 2)
-        sleep.assert_called_once()
+        self.assertEqual(login_request.get_method(), "POST")
+        self.assertEqual(
+            json.loads(login_request.data.decode("utf-8")),
+            {"method": "internal"},
+        )
+        startfile.assert_called_once_with(
+            "https://copilot.tencent.com/auth/test"
+        )
+        run.assert_called_once_with([
+            "taskkill", "/PID", "4242", "/T", "/F",
+        ])
 
     def test_main_handles_ctrl_c_without_traceback(self):
         output = StringIO()

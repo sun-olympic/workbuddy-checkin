@@ -125,6 +125,8 @@ python3 checkin_cli.py wizard
 3. 打开浏览器，等待用户完成一次扫码/授权。
 4. 获取有效登录态后继续配置。
 
+Windows 会启动 CodeBuddy 本地 Web 登录服务，自动选择国内站点并用系统默认浏览器打开授权地址，不再通过终端 TUI 模拟按键。
+
 此模式需要 Node.js 18.20.8+ 和 npm，但不需要安装或运行 WorkBuddy。CodeBuddy CLI 2.127.2 的 npm 包下载约 2.2 MB、解压约 111 MB；Node.js 占用不包含在内。
 
 ## 绑定微信

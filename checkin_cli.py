@@ -41,6 +41,7 @@ import tempfile
 import plistlib
 import shutil
 import shlex
+import socket
 import stat
 import urllib.request
 import urllib.error
@@ -389,8 +390,72 @@ def _launch_codebuddy_login_and_wait(cli_path):
         process = None
         uses_process_group = False
         try:
-            expect = shutil.which("expect") if sys.platform == "darwin" else ""
-            if expect:
+            if sys.platform == "win32":
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+                    probe.bind(("127.0.0.1", 0))
+                    port = probe.getsockname()[1]
+                base_url = f"http://127.0.0.1:{port}"
+                process = subprocess.Popen([
+                    cli_path,
+                    "--serve",
+                    "--host", "127.0.0.1",
+                    "--port", str(port),
+                    "--settings", settings,
+                ], cwd=BASE_DIR)
+
+                status = None
+                deadline = time.monotonic() + 15
+                while time.monotonic() < deadline:
+                    try:
+                        request = urllib.request.Request(
+                            f"{base_url}/api/v1/auth/account/status",
+                            headers={"x-codebuddy-request": "1"},
+                            method="GET",
+                        )
+                        with urllib.request.urlopen(request, timeout=2) as response:
+                            payload = json.loads(response.read().decode("utf-8"))
+                        status = payload.get("data", payload)
+                        break
+                    except (OSError, ValueError, urllib.error.URLError):
+                        if process.poll() not in (None, 0):
+                            break
+                        time.sleep(0.25)
+
+                login_methods = (status or {}).get("loginMethods") or []
+                method_ids = {item.get("id") for item in login_methods}
+                if "internal" not in method_ids:
+                    if process.poll() is None:
+                        process.terminate()
+                    print("❌ CodeBuddy 登录服务未返回国内站登录入口，请重试。")
+                    return False
+
+                request = urllib.request.Request(
+                    f"{base_url}/api/v1/auth/account/login",
+                    data=json.dumps({"method": "internal"}).encode("utf-8"),
+                    headers={
+                        "x-codebuddy-request": "1",
+                        "Content-Type": "application/json",
+                    },
+                    method="POST",
+                )
+                with urllib.request.urlopen(request, timeout=5) as response:
+                    payload = json.loads(response.read().decode("utf-8"))
+                login_data = payload.get("data", payload)
+                auth_url = login_data.get("authUrl", "")
+                if not login_data.get("success") or not auth_url:
+                    if process.poll() is None:
+                        process.terminate()
+                    print("❌ CodeBuddy 未返回浏览器登录地址，请重试。")
+                    return False
+
+                try:
+                    os.startfile(auth_url)
+                except OSError:
+                    webbrowser.open(auth_url)
+                print("🌐 已打开 CodeBuddy 国内站登录页，请在浏览器完成授权。")
+            else:
+                expect = shutil.which("expect") if sys.platform == "darwin" else ""
+            if sys.platform != "win32" and expect:
                 expect_script = (
                     'spawn -noecho $env(WORKBUDDY_CODEBUDDY_CLI) '
                     '--settings $env(WORKBUDDY_CODEBUDDY_SETTINGS)\n'
@@ -422,17 +487,13 @@ def _launch_codebuddy_login_and_wait(cli_path):
                 process = subprocess.Popen([
                     expect, "-c", expect_script,
                 ], cwd=BASE_DIR, env=child_env, start_new_session=True)
-            else:
+            elif sys.platform != "win32":
                 process = subprocess.Popen([
                     cli_path, "--settings", settings,
                 ], cwd=BASE_DIR, stdin=subprocess.PIPE, text=True)
                 process.stdin.write("/login\n")
                 process.stdin.flush()
-                if sys.platform == "win32":
-                    time.sleep(1)
-                    process.stdin.write("\r")
-                    process.stdin.flush()
-        except OSError as e:
+        except (OSError, ValueError, urllib.error.URLError) as e:
             if process is not None and process.poll() is None:
                 process.terminate()
             print(f"❌ 无法启动 CodeBuddy CLI：{e}")
@@ -449,6 +510,12 @@ def _launch_codebuddy_login_and_wait(cli_path):
                 except OSError:
                     if process.poll() is None:
                         process.terminate()
+            elif sys.platform == "win32" and process.poll() is None:
+                _run([
+                    "taskkill", "/PID", str(process.pid), "/T", "/F",
+                ])
+                if process.poll() is None:
+                    process.terminate()
             elif process.poll() is None:
                 process.terminate()
             try:

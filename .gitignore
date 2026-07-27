@@ -1,0 +1,18 @@
+# 本地配置（含微信推送凭证 / token，切勿提交）
+checkin_config.json
+
+# 运行产物
+checkin.log
+launchd.out.log
+launchd.err.log
+com.user.workbuddy-checkin.plist
+.wecom_token.json
+.wx_test_token.json
+wx_bind_error.png
+wx_qr_screenshot.png
+.venv-wx-bind/
+
+# Python 缓存
+__pycache__/
+*.pyc
+.DS_Store

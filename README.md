@@ -199,9 +199,9 @@ python checkin_cli.py uninstall --purge --codebuddy
 ```
 
 默认的 `--purge` 不会删除独立 CodeBuddy CLI 及其账号登录状态。增加
-`--codebuddy` 后会先调用 CodeBuddy `/logout` 清理 macOS Keychain 或 Windows
-凭据管理器中的登录态，再卸载 npm 全局包，并删除 CodeBuddy 配置、缓存、原生安装文件
-和共享登录文件。该操作可能同时注销 WorkBuddy/CodeBuddy，且不可恢复。
+`--codebuddy` 后会停止 CodeBuddy 后台服务、卸载 npm 全局包，并删除 CodeBuddy
+配置、缓存、原生安装文件和共享认证文件。清理过程不会启动交互式 `/logout`，
+因此不会弹出登录站点选择。该操作可能同时注销 WorkBuddy/CodeBuddy，且不可恢复。
 
 交互确认适合人工操作；自动清理时可显式跳过确认：
 

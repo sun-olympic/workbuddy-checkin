@@ -424,7 +424,7 @@ class EnvironmentPreflightTest(unittest.TestCase):
         self.assertTrue(popen.call_args.kwargs["text"])
         self.assertEqual(
             process.stdin.write.call_args_list,
-            [mock.call("/login\n"), mock.call("\n")],
+            [mock.call("/login\n"), mock.call("\r")],
         )
         self.assertEqual(process.stdin.flush.call_count, 2)
         sleep.assert_called_once()
@@ -693,14 +693,14 @@ class PurgeUninstallTest(unittest.TestCase):
         self.assertEqual(npm, r"C:\Program Files\nodejs\npm.cmd")
         which.assert_called_once_with("npm.cmd")
 
-    def test_codebuddy_purge_logs_out_and_uninstalls_npm_package(self):
+    def test_codebuddy_purge_does_not_launch_interactive_logout(self):
         with mock.patch.object(
                     checkin_cli, "_find_codebuddy_cli",
                     return_value="/usr/local/bin/codebuddy",
                 ), \
                 mock.patch.object(
-                    checkin_cli, "_logout_codebuddy", return_value=True,
-                ) as logout, \
+                    checkin_cli.subprocess, "Popen", return_value=mock.Mock(),
+                ) as popen, \
                 mock.patch.object(
                     checkin_cli.shutil, "which", return_value="/usr/local/bin/npm",
                 ), \
@@ -714,7 +714,7 @@ class PurgeUninstallTest(unittest.TestCase):
 
         self.assertEqual(removed, [])
         self.assertEqual(failures, [])
-        logout.assert_called_once_with("/usr/local/bin/codebuddy")
+        popen.assert_not_called()
         self.assertIn(
             mock.call([
                 "/usr/local/bin/npm", "uninstall", "-g",

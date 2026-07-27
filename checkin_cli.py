@@ -430,7 +430,7 @@ def _launch_codebuddy_login_and_wait(cli_path):
                 process.stdin.flush()
                 if sys.platform == "win32":
                     time.sleep(1)
-                    process.stdin.write("\n")
+                    process.stdin.write("\r")
                     process.stdin.flush()
         except OSError as e:
             if process is not None and process.poll() is None:
@@ -2279,32 +2279,13 @@ def _codebuddy_purge_targets():
     return list(dict.fromkeys(targets))
 
 
-def _logout_codebuddy(cli_path):
-    """在删除 CLI 前调用官方 /logout，让系统钥匙串/凭据管理器清除登录态。"""
-    try:
-        process = subprocess.Popen([cli_path, "/logout"], cwd=BASE_DIR)
-    except OSError:
-        return False
-    try:
-        process.wait(timeout=8)
-    except subprocess.TimeoutExpired:
-        process.terminate()
-        try:
-            process.wait(timeout=3)
-        except subprocess.TimeoutExpired:
-            process.kill()
-    return True
-
-
 def _purge_codebuddy():
-    """退出账号、移除 npm 包，并清理 CodeBuddy CLI 的所有本地数据。"""
+    """停止服务、移除 npm 包，并清理 CodeBuddy CLI 的所有本地数据。"""
     failures = []
     cli_path = _find_codebuddy_cli()
     if cli_path:
         _run([cli_path, "daemon", "stop"])
         _run([cli_path, "daemon", "uninstall"])
-        if not _logout_codebuddy(cli_path):
-            failures.append("CodeBuddy /logout 启动失败，系统凭据可能需要手动清理")
 
     npm = _find_npm_cli()
     if npm:

@@ -284,8 +284,14 @@ class EnvironmentPreflightTest(unittest.TestCase):
         self.assertTrue(result)
         command = popen.call_args.args[0]
         self.assertEqual(command[0], "/usr/bin/expect")
-        self.assertIn('send -- "/login\\r"', command[2])
-        self.assertNotIn("spawn -noecho --", command[2])
+        expect_script = command[2]
+        self.assertIn('send -- "/login\\r"', expect_script)
+        self.assertNotIn("spawn -noecho --", expect_script)
+        self.assertIn("Tips for getting started", expect_script)
+        self.assertLess(
+            expect_script.index("Tips for getting started"),
+            expect_script.index('send -- "/login\\r"'),
+        )
         self.assertEqual(len(command), 3)
         self.assertNotIn("--serve", command)
         self.assertNotIn("--open", command)

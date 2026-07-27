@@ -375,7 +375,13 @@ def _launch_codebuddy_login_and_wait(cli_path):
                 expect_script = (
                     'spawn -noecho $env(WORKBUDDY_CODEBUDDY_CLI) '
                     '--settings $env(WORKBUDDY_CODEBUDDY_SETTINGS)\n'
-                    'after 1200\n'
+                    'set timeout 45\n'
+                    'expect {\n'
+                    '  -re {Tips for getting started|Recent activity} {}\n'
+                    '  timeout { exit 124 }\n'
+                    '  eof { exit 125 }\n'
+                    '}\n'
+                    'after 300\n'
                     'send -- "/login\\r"\n'
                     'interact'
                 )

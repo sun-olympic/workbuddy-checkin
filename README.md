@@ -104,6 +104,7 @@ python3 checkin_cli.py wx-bind --mode manual
 | 发送测试通知 | `python3 checkin_cli.py test-notify` |
 | 卸载定时任务，保留配置 | `python3 checkin_cli.py uninstall` |
 | 彻底清理运行数据 | `python3 checkin_cli.py uninstall --purge` |
+| 连同 CodeBuddy 和登录态一起删除 | `python3 checkin_cli.py uninstall --purge --codebuddy` |
 
 彻底清理会删除任务计划或 plist，以及配置、微信凭证/token 缓存、日志、截图、Python/测试缓存和 Playwright 专用环境；项目源码保留。
 
@@ -115,6 +116,9 @@ python3 checkin_cli.py uninstall
 
 # 删除定时任务并彻底清理所有签到相关配置
 python3 checkin_cli.py uninstall --purge
+
+# 另行删除 CodeBuddy CLI、全部配置和账号登录态
+python3 checkin_cli.py uninstall --purge --codebuddy
 ```
 
 Windows PowerShell：
@@ -122,9 +126,19 @@ Windows PowerShell：
 ```powershell
 python checkin_cli.py uninstall
 python checkin_cli.py uninstall --purge
+python checkin_cli.py uninstall --purge --codebuddy
 ```
 
-彻底清理不会删除独立 CodeBuddy CLI 及其账号登录状态，以免影响 CodeBuddy 的正常使用。
+默认的 `--purge` 不会删除独立 CodeBuddy CLI 及其账号登录状态。增加
+`--codebuddy` 后会先调用 CodeBuddy `/logout` 清理 macOS Keychain 或 Windows
+凭据管理器中的登录态，再卸载 npm 全局包，并删除 CodeBuddy 配置、缓存、原生安装文件
+和共享登录文件。该操作可能同时注销 WorkBuddy/CodeBuddy，且不可恢复。
+
+交互确认适合人工操作；自动清理时可显式跳过确认：
+
+```bash
+python3 checkin_cli.py uninstall --purge --codebuddy --yes
+```
 
 ## 命令行配置示例
 

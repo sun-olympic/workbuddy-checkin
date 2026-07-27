@@ -11,6 +11,7 @@ WorkBuddy 签到 · 命令行运行器（CLI）
   python3 checkin_cli.py install                # 注册每日定时任务和登录补跑任务
   python3 checkin_cli.py uninstall              # 卸载定时任务
   python3 checkin_cli.py uninstall --purge      # 卸载并彻底删除所有签到运行配置
+  python3 checkin_cli.py uninstall --purge --codebuddy  # 另删除 CodeBuddy CLI 和登录态
   python3 checkin_cli.py status                 # 查看当前配置 / 定时 / 注册状态
   python3 checkin_cli.py wx-bind                 # 微信一键绑定：弹出浏览器，除扫码外全自动
   python3 checkin_cli.py run [--dry-run|--force|--no-retry]   # 立即手动跑一次
@@ -2042,19 +2043,42 @@ def cmd_install(args):
 
 
 def cmd_uninstall(args):
+    purge_codebuddy = getattr(args, "purge_codebuddy", False)
+    if purge_codebuddy and not getattr(args, "purge", False):
+        print("❌ --codebuddy 必须与 --purge 一起使用。")
+        return 2
+
+    if purge_codebuddy and not getattr(args, "yes", False):
+        print("⚠️  将删除 CodeBuddy CLI、全部 CodeBuddy 配置及账号登录态。")
+        print("   这也会清除本机共享的 WorkBuddy/CodeBuddy 登录凭证，且不可恢复。")
+        try:
+            answer = input("确认继续？请输入 y: ").strip().lower()
+        except EOFError:
+            answer = ""
+        if answer not in ("y", "yes"):
+            print("ℹ️  已取消，未删除任何内容。")
+            return 1
+
     ok, msg = uninstall()
     print(("✅ " if ok else "⚠️ ") + msg)
     if not getattr(args, "purge", False):
         return 0 if ok else 1
 
     removed, failures = _purge_paths(_purge_targets())
+    if purge_codebuddy:
+        codebuddy_removed, codebuddy_failures = _purge_codebuddy()
+        removed.extend(codebuddy_removed)
+        failures.extend(codebuddy_failures)
     for path in removed:
         print(f"🧹 已删除：{path}")
     if failures:
         for failure in failures:
             print(f"❌ 删除失败：{failure}")
         return 1
-    print("✅ 已彻底删除签到配置、凭证缓存、日志、截图和浏览器运行环境；项目源码保留。")
+    if purge_codebuddy:
+        print("✅ 已彻底删除签到数据、CodeBuddy CLI、配置和账号登录态；项目源码保留。")
+    else:
+        print("✅ 已彻底删除签到配置、凭证缓存、日志、截图和浏览器运行环境；项目源码保留。")
     print("⚠️  上述运行数据不可恢复。")
     return 0 if ok else 1
 
@@ -2101,6 +2125,95 @@ def _purge_paths(paths):
             removed.append(path)
         except Exception as e:
             failures.append(f"{path}: {e}")
+    return removed, failures
+
+
+def _codebuddy_purge_targets():
+    """CodeBuddy 完整卸载目标，仅包含官方 CLI 路径、配置和共享登录文件。"""
+    home = os.path.expanduser("~")
+    targets = [
+        os.path.join(home, ".codebuddy"),
+        os.path.join(home, ".local", "share", "codebuddy"),
+        os.path.join(home, ".cache", "codebuddy"),
+    ]
+    custom_config = os.environ.get("CODEBUDDY_CONFIG_DIR", "").strip()
+    if custom_config:
+        candidate = os.path.abspath(os.path.expanduser(custom_config))
+        resolved = os.path.realpath(candidate)
+        protected = {
+            os.path.abspath(os.path.sep),
+            os.path.abspath(home),
+            os.path.abspath(BASE_DIR),
+        }
+        if (resolved not in protected
+                and "codebuddy" in os.path.basename(candidate).lower()):
+            targets.append(candidate)
+
+    if sys.platform == "win32":
+        local_app_data = os.environ.get("LOCALAPPDATA") or os.path.join(
+            home, "AppData", "Local"
+        )
+        app_data = os.environ.get("APPDATA") or os.path.join(
+            home, "AppData", "Roaming"
+        )
+        targets.extend([
+            os.path.join(local_app_data, "codebuddy"),
+            os.path.join(app_data, "CodeBuddy Code"),
+            os.path.join(
+                local_app_data, "CodeBuddyExtension", "Data", "Public",
+                "auth", "workbuddy-desktop.info",
+            ),
+        ])
+    else:
+        targets.extend([
+            os.path.join(home, ".local", "bin", name)
+            for name in ("codebuddy", "cbc", "codebuddy-code", "cbc-prewarm")
+        ])
+        if sys.platform == "darwin":
+            targets.append(os.path.join(
+                home, "Library", "Application Support", "CodeBuddyExtension",
+                "Data", "Public", "auth", "workbuddy-desktop.info",
+            ))
+    return list(dict.fromkeys(targets))
+
+
+def _logout_codebuddy(cli_path):
+    """在删除 CLI 前调用官方 /logout，让系统钥匙串/凭据管理器清除登录态。"""
+    try:
+        process = subprocess.Popen([cli_path, "/logout"], cwd=BASE_DIR)
+    except OSError:
+        return False
+    try:
+        process.wait(timeout=8)
+    except subprocess.TimeoutExpired:
+        process.terminate()
+        try:
+            process.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            process.kill()
+    return True
+
+
+def _purge_codebuddy():
+    """退出账号、移除 npm 包，并清理 CodeBuddy CLI 的所有本地数据。"""
+    failures = []
+    cli_path = _find_codebuddy_cli()
+    if cli_path:
+        _run([cli_path, "daemon", "stop"])
+        _run([cli_path, "daemon", "uninstall"])
+        if not _logout_codebuddy(cli_path):
+            failures.append("CodeBuddy /logout 启动失败，系统凭据可能需要手动清理")
+
+    npm = shutil.which("npm")
+    if npm:
+        rc, out, err = _run([
+            npm, "uninstall", "-g", CODEBUDDY_NPM_PACKAGE,
+        ])
+        if rc != 0:
+            failures.append(err or out or "CodeBuddy npm 全局包卸载失败")
+
+    removed, path_failures = _purge_paths(_codebuddy_purge_targets())
+    failures.extend(path_failures)
     return removed, failures
 
 
@@ -2252,6 +2365,15 @@ def build_parser():
     pu.add_argument(
         "--purge", action="store_true",
         help="彻底删除签到配置、凭证缓存、日志、截图及 Playwright 专用环境（不可恢复）",
+    )
+    pu.add_argument(
+        "--codebuddy", "--purge-codebuddy", dest="purge_codebuddy",
+        action="store_true",
+        help="与 --purge 一起使用：另删除 CodeBuddy CLI、配置及账号登录态",
+    )
+    pu.add_argument(
+        "--yes", action="store_true",
+        help="跳过 --codebuddy 的不可恢复删除确认",
     )
     pu.set_defaults(func=cmd_uninstall)
 

@@ -425,6 +425,122 @@ class PurgeUninstallTest(unittest.TestCase):
 
         self.assertTrue(args.purge)
 
+    def test_uninstall_parser_accepts_codebuddy_and_noninteractive_flags(self):
+        args = checkin_cli.build_parser().parse_args([
+            "uninstall", "--purge", "--codebuddy", "--yes",
+        ])
+
+        self.assertTrue(args.purge)
+        self.assertTrue(args.purge_codebuddy)
+        self.assertTrue(args.yes)
+
+    def test_codebuddy_deletion_requires_full_purge(self):
+        args = checkin_cli.argparse.Namespace(
+            purge=False, purge_codebuddy=True, yes=True,
+        )
+        output = StringIO()
+        with mock.patch.object(checkin_cli, "uninstall") as uninstall, \
+                mock.patch.object(checkin_cli, "_purge_codebuddy") as purge, \
+                redirect_stdout(output):
+            result = checkin_cli.cmd_uninstall(args)
+
+        self.assertEqual(result, 2)
+        self.assertIn("--purge", output.getvalue())
+        uninstall.assert_not_called()
+        purge.assert_not_called()
+
+    def test_codebuddy_deletion_can_be_cancelled_before_any_removal(self):
+        args = checkin_cli.argparse.Namespace(
+            purge=True, purge_codebuddy=True, yes=False,
+        )
+        with mock.patch("builtins.input", return_value="n"), \
+                mock.patch.object(checkin_cli, "uninstall") as uninstall, \
+                mock.patch.object(checkin_cli, "_purge_paths") as purge_paths, \
+                mock.patch.object(checkin_cli, "_purge_codebuddy") as purge_codebuddy, \
+                redirect_stdout(StringIO()):
+            result = checkin_cli.cmd_uninstall(args)
+
+        self.assertEqual(result, 1)
+        uninstall.assert_not_called()
+        purge_paths.assert_not_called()
+        purge_codebuddy.assert_not_called()
+
+    def test_confirmed_codebuddy_deletion_removes_cli_and_login_state(self):
+        args = checkin_cli.argparse.Namespace(
+            purge=True, purge_codebuddy=True, yes=True,
+        )
+        with mock.patch.object(
+                    checkin_cli, "uninstall", return_value=(True, "removed"),
+                ), \
+                mock.patch.object(
+                    checkin_cli, "_purge_paths", return_value=([], []),
+                ), \
+                mock.patch.object(
+                    checkin_cli, "_purge_codebuddy", return_value=(["cli"], []),
+                ) as purge_codebuddy, \
+                redirect_stdout(StringIO()):
+            result = checkin_cli.cmd_uninstall(args)
+
+        self.assertEqual(result, 0)
+        purge_codebuddy.assert_called_once_with()
+
+    def test_codebuddy_purge_targets_include_cli_config_and_shared_login(self):
+        with mock.patch.object(checkin_cli.sys, "platform", "darwin"):
+            targets = set(checkin_cli._codebuddy_purge_targets())
+
+        self.assertIn(
+            checkin_cli.os.path.expanduser("~/.codebuddy"), targets,
+        )
+        self.assertIn(
+            checkin_cli.os.path.expanduser("~/.local/bin/codebuddy"), targets,
+        )
+        self.assertIn(
+            checkin_cli.os.path.expanduser(
+                "~/Library/Application Support/CodeBuddyExtension/Data/Public/"
+                "auth/workbuddy-desktop.info"
+            ),
+            targets,
+        )
+
+    def test_codebuddy_purge_rejects_unsafe_custom_config_directory(self):
+        with mock.patch.dict(
+                    checkin_cli.os.environ,
+                    {"CODEBUDDY_CONFIG_DIR": checkin_cli.os.path.sep},
+                ):
+            targets = set(checkin_cli._codebuddy_purge_targets())
+
+        self.assertNotIn(checkin_cli.os.path.abspath(checkin_cli.os.path.sep), targets)
+
+    def test_codebuddy_purge_logs_out_and_uninstalls_npm_package(self):
+        with mock.patch.object(
+                    checkin_cli, "_find_codebuddy_cli",
+                    return_value="/usr/local/bin/codebuddy",
+                ), \
+                mock.patch.object(
+                    checkin_cli, "_logout_codebuddy", return_value=True,
+                ) as logout, \
+                mock.patch.object(
+                    checkin_cli.shutil, "which", return_value="/usr/local/bin/npm",
+                ), \
+                mock.patch.object(
+                    checkin_cli, "_run", return_value=(0, "", ""),
+                ) as run, \
+                mock.patch.object(
+                    checkin_cli, "_purge_paths", return_value=([], []),
+                ):
+            removed, failures = checkin_cli._purge_codebuddy()
+
+        self.assertEqual(removed, [])
+        self.assertEqual(failures, [])
+        logout.assert_called_once_with("/usr/local/bin/codebuddy")
+        self.assertIn(
+            mock.call([
+                "/usr/local/bin/npm", "uninstall", "-g",
+                checkin_cli.CODEBUDDY_NPM_PACKAGE,
+            ]),
+            run.call_args_list,
+        )
+
     def test_purge_removes_only_supplied_runtime_files_and_directories(self):
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)

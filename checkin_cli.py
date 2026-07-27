@@ -38,6 +38,7 @@ import subprocess
 import tempfile
 import plistlib
 import shutil
+import shlex
 import urllib.request
 import urllib.error
 import webbrowser
@@ -329,28 +330,61 @@ def _wait_for_workbuddy_token(timeout_seconds=180, poll_seconds=2):
     return _workbuddy_token_ready()
 
 
+def _codebuddy_login_settings(signal_path):
+    """用一次性 auth_success hook 通知父向导登录已经完成。"""
+    hook_path = signal_path.replace("\\", "/")
+    return json.dumps({
+        "hooks": {
+            "Notification": [{
+                "matcher": "auth_success",
+                "hooks": [{
+                    "type": "command",
+                    "command": f"touch {shlex.quote(hook_path)}",
+                }],
+            }],
+        },
+    }, ensure_ascii=False)
+
+
+def _wait_for_codebuddy_login(process, signal_path, timeout_seconds=180,
+                              poll_seconds=0.5):
+    """等待 token 或 CodeBuddy 的 auth_success 通知，避免登录界面常驻。"""
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        if _workbuddy_token_ready() or os.path.exists(signal_path):
+            return True
+        if process.poll() is not None:
+            return _workbuddy_token_ready() or os.path.exists(signal_path)
+        time.sleep(poll_seconds)
+    return _workbuddy_token_ready() or os.path.exists(signal_path)
+
+
 def _launch_codebuddy_login_and_wait(cli_path):
     """启动独立 CLI 的浏览器登录，并等待其官方登录状态落盘。"""
     print("🔐 正在启动无 WorkBuddy 登录，并自动唤起浏览器。")
     print("   除浏览器中的登录确认外，无需复制 Token；最多等待 180 秒。")
-    try:
-        process = subprocess.Popen([
-            cli_path,
-            "/login",
-        ], cwd=BASE_DIR)
-    except OSError as e:
-        print(f"❌ 无法启动 CodeBuddy CLI：{e}")
-        return False
+    with tempfile.TemporaryDirectory(prefix="workbuddy-login-") as temp_dir:
+        signal_path = os.path.join(temp_dir, "auth-success")
+        settings = _codebuddy_login_settings(signal_path)
+        try:
+            process = subprocess.Popen([
+                cli_path,
+                "--settings", settings,
+                "/login",
+            ], cwd=BASE_DIR)
+        except OSError as e:
+            print(f"❌ 无法启动 CodeBuddy CLI：{e}")
+            return False
 
-    try:
-        ready = _wait_for_workbuddy_token()
-    finally:
-        if process.poll() is None:
-            process.terminate()
-            try:
-                process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                process.kill()
+        try:
+            ready = _wait_for_codebuddy_login(process, signal_path)
+        finally:
+            if process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    process.kill()
     if not ready:
         print("❌ 等待登录超时。请确认浏览器授权成功后重试。")
         return False
@@ -2242,7 +2276,11 @@ def main():
     if not getattr(args, "cmd", None):
         parser.print_help()
         return 0
-    return args.func(args)
+    try:
+        return args.func(args)
+    except KeyboardInterrupt:
+        print("\n⚠️ 已取消当前操作。")
+        return 130
 
 
 if __name__ == "__main__":

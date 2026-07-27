@@ -235,6 +235,18 @@ class WxBindHelpersTest(unittest.TestCase):
 
 
 class EnvironmentPreflightTest(unittest.TestCase):
+    def test_codebuddy_auth_success_hook_signals_wizard_to_resume(self):
+        settings = json.loads(checkin_cli._codebuddy_login_settings(
+            "/tmp/workbuddy login.done"
+        ))
+
+        notification = settings["hooks"]["Notification"][0]
+        self.assertEqual(notification["matcher"], "auth_success")
+        self.assertIn(
+            "/tmp/workbuddy login.done",
+            notification["hooks"][0]["command"],
+        )
+
     def test_codebuddy_login_uses_interactive_login_command_to_open_browser(self):
         process = mock.Mock()
         process.poll.return_value = None
@@ -242,7 +254,7 @@ class EnvironmentPreflightTest(unittest.TestCase):
                     checkin_cli.subprocess, "Popen", return_value=process,
                 ) as popen, \
                 mock.patch.object(
-                    checkin_cli, "_wait_for_workbuddy_token", return_value=True,
+                    checkin_cli, "_wait_for_codebuddy_login", return_value=True,
                 ), \
                 redirect_stdout(StringIO()):
             result = checkin_cli._launch_codebuddy_login_and_wait(
@@ -250,11 +262,28 @@ class EnvironmentPreflightTest(unittest.TestCase):
             )
 
         self.assertTrue(result)
-        popen.assert_called_once_with(
-            ["/usr/local/bin/codebuddy", "/login"],
-            cwd=checkin_cli.BASE_DIR,
-        )
+        command = popen.call_args.args[0]
+        self.assertEqual(command[0], "/usr/local/bin/codebuddy")
+        self.assertEqual(command[-1], "/login")
+        self.assertIn("--settings", command)
+        popen.assert_called_once()
         process.terminate.assert_called_once_with()
+
+    def test_main_handles_ctrl_c_without_traceback(self):
+        output = StringIO()
+        with mock.patch.object(
+                    checkin_cli, "build_parser",
+                    return_value=mock.Mock(
+                        parse_args=mock.Mock(return_value=mock.Mock(
+                            cmd="wizard",
+                            func=mock.Mock(side_effect=KeyboardInterrupt),
+                        )),
+                    ),
+                ), redirect_stdout(output):
+            result = checkin_cli.main()
+
+        self.assertEqual(result, 130)
+        self.assertIn("已取消", output.getvalue())
 
     def test_windows_ready_environment_passes_without_workbuddy(self):
         with mock.patch.object(checkin_cli.sys, "platform", "win32"), \

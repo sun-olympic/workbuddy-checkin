@@ -492,6 +492,56 @@ class EnvironmentPreflightTest(unittest.TestCase):
             "taskkill", "/PID", "4242", "/T", "/F",
         ])
 
+    def test_windows_codebuddy_login_waits_when_auth_url_is_async(self):
+        responses = [
+            self._JsonResponse({
+                "data": {
+                    "authenticated": False,
+                    "loginMethods": [
+                        {"id": "internal", "label": "国内站点登录"},
+                    ],
+                },
+            }),
+            self._JsonResponse({"data": {"success": True}}),
+        ]
+        process = mock.Mock()
+        process.pid = 4242
+        process.poll.return_value = None
+        socket_context = mock.MagicMock()
+        socket_context.__enter__.return_value.getsockname.return_value = (
+            "127.0.0.1", 54321,
+        )
+        with mock.patch.object(checkin_cli.sys, "platform", "win32"), \
+                mock.patch.object(
+                    socket, "socket", return_value=socket_context,
+                ), \
+                mock.patch.object(
+                    checkin_cli.subprocess, "Popen", return_value=process,
+                ), \
+                mock.patch.object(
+                    checkin_cli.urllib.request,
+                    "urlopen",
+                    side_effect=responses,
+                ), \
+                mock.patch.object(
+                    checkin_cli, "_wait_for_codebuddy_login", return_value=True,
+                ) as wait_for_login, \
+                mock.patch.object(
+                    checkin_cli.os, "startfile", create=True,
+                ) as startfile, \
+                mock.patch.object(
+                    checkin_cli, "_run", return_value=(0, "", ""),
+                ), \
+                mock.patch.object(checkin_cli.time, "sleep"), \
+                redirect_stdout(StringIO()):
+            result = checkin_cli._launch_codebuddy_login_and_wait(
+                "C:\\CodeBuddy\\codebuddy.exe"
+            )
+
+        self.assertTrue(result)
+        wait_for_login.assert_called_once()
+        startfile.assert_not_called()
+
     def test_main_handles_ctrl_c_without_traceback(self):
         output = StringIO()
         with mock.patch.object(

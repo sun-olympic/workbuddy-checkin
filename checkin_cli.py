@@ -442,17 +442,20 @@ def _launch_codebuddy_login_and_wait(cli_path):
                     payload = json.loads(response.read().decode("utf-8"))
                 login_data = payload.get("data", payload)
                 auth_url = login_data.get("authUrl", "")
-                if not login_data.get("success") or not auth_url:
+                if not login_data.get("success"):
                     if process.poll() is None:
                         process.terminate()
-                    print("❌ CodeBuddy 未返回浏览器登录地址，请重试。")
+                    print("❌ CodeBuddy 未能启动浏览器登录，请重试。")
                     return False
 
-                try:
-                    os.startfile(auth_url)
-                except OSError:
-                    webbrowser.open(auth_url)
-                print("🌐 已打开 CodeBuddy 国内站登录页，请在浏览器完成授权。")
+                if auth_url:
+                    try:
+                        os.startfile(auth_url)
+                    except OSError:
+                        webbrowser.open(auth_url)
+                    print("🌐 已打开 CodeBuddy 国内站登录页，请在浏览器完成授权。")
+                else:
+                    print("🌐 CodeBuddy 已触发国内站登录，请在浏览器完成授权。")
             else:
                 expect = shutil.which("expect") if sys.platform == "darwin" else ""
             if sys.platform != "win32" and expect:

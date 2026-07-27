@@ -282,6 +282,15 @@ def _find_codebuddy_cli():
     return shutil.which("codebuddy") or shutil.which("cbc") or ""
 
 
+def _find_npm_cli():
+    """返回 npm 可执行文件；Windows 避开受 PowerShell 策略限制的 npm.ps1。"""
+    candidates = (
+        ("npm.cmd", "npm.exe", "npm")
+        if sys.platform == "win32" else ("npm",)
+    )
+    return next((path for name in candidates if (path := shutil.which(name))), "")
+
+
 def _ensure_codebuddy_cli():
     """确保无 WorkBuddy 模式所需的独立 CodeBuddy CLI 已安装。"""
     cli_path = _find_codebuddy_cli()
@@ -290,17 +299,19 @@ def _ensure_codebuddy_cli():
         return cli_path
 
     print("⚠️  未找到独立 CodeBuddy CLI（无 WorkBuddy 模式需要它完成登录）。")
-    npm = shutil.which("npm")
+    npm = _find_npm_cli()
     if not npm:
+        npm_command = "npm.cmd" if sys.platform == "win32" else "npm"
         print("❌ 未找到 npm。请先安装 Node.js 18.20.8+，然后执行：")
-        print(f"   npm install -g {CODEBUDDY_NPM_PACKAGE}")
+        print(f"   {npm_command} install -g {CODEBUDDY_NPM_PACKAGE}")
         return ""
     try:
         answer = input("是否现在自动安装 CodeBuddy CLI？[Y/n]: ").strip().lower()
     except EOFError:
         answer = "n"
     if answer in ("n", "no"):
-        print(f"❌ 已取消。可稍后手动执行：npm install -g {CODEBUDDY_NPM_PACKAGE}")
+        npm_command = "npm.cmd" if sys.platform == "win32" else "npm"
+        print(f"❌ 已取消。可稍后手动执行：{npm_command} install -g {CODEBUDDY_NPM_PACKAGE}")
         return ""
 
     print("📦 正在安装独立 CodeBuddy CLI…")
@@ -2280,7 +2291,7 @@ def _purge_codebuddy():
         if not _logout_codebuddy(cli_path):
             failures.append("CodeBuddy /logout 启动失败，系统凭据可能需要手动清理")
 
-    npm = shutil.which("npm")
+    npm = _find_npm_cli()
     if npm:
         rc, out, err = _run([
             npm, "uninstall", "-g", CODEBUDDY_NPM_PACKAGE,

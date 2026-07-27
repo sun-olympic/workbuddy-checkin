@@ -71,7 +71,7 @@ python --version
 
 ```powershell
 node --version
-npm --version
+npm.cmd --version
 ```
 
 若任一命令不存在，使用 WinGet 安装 Node.js LTS（会同时安装 npm）：
@@ -80,7 +80,7 @@ npm --version
 winget install --id OpenJS.NodeJS.LTS -e --accept-package-agreements --accept-source-agreements
 ```
 
-安装完成后重新打开 PowerShell，再执行 `node --version` 和 `npm --version`。如果没有 `winget`，请使用 [Node.js 官方安装器](https://nodejs.org/en/download)，并选择 LTS 版本。
+安装完成后重新打开 PowerShell，再执行 `node --version` 和 `npm.cmd --version`。PowerShell 中请使用 `npm.cmd`；直接输入 `npm` 可能会调用 `npm.ps1`，并被系统执行策略拦截，无需为此修改执行策略。如果没有 `winget`，请使用 [Node.js 官方安装器](https://nodejs.org/en/download)，并选择 LTS 版本。
 
 ## 快速开始
 
@@ -121,7 +121,7 @@ python3 checkin_cli.py wizard
 未检测到 WorkBuddy 时会自动进入无 WorkBuddy 模式；已安装 WorkBuddy 时，在登录方式中选择 `2`。向导会：
 
 1. 检查独立 CodeBuddy CLI。
-2. 如未安装，询问后自动执行 `npm install -g @tencent-ai/codebuddy-code`。
+2. 如未安装，询问后自动执行 `npm install -g @tencent-ai/codebuddy-code`；Windows 会自动改用 `npm.cmd`。
 3. 打开浏览器，等待用户完成一次扫码/授权。
 4. 获取有效登录态后继续配置。
 

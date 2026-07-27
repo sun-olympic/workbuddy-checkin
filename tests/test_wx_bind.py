@@ -673,6 +673,21 @@ class PurgeUninstallTest(unittest.TestCase):
 
         self.assertNotIn(checkin_cli.os.path.abspath(checkin_cli.os.path.sep), targets)
 
+    def test_windows_npm_lookup_prefers_cmd_to_avoid_powershell_policy(self):
+        with mock.patch.object(checkin_cli.sys, "platform", "win32"), \
+                mock.patch.object(
+                    checkin_cli.shutil,
+                    "which",
+                    side_effect=lambda name: (
+                        r"C:\Program Files\nodejs\npm.cmd"
+                        if name == "npm.cmd" else None
+                    ),
+                ) as which:
+            npm = checkin_cli._find_npm_cli()
+
+        self.assertEqual(npm, r"C:\Program Files\nodejs\npm.cmd")
+        which.assert_called_once_with("npm.cmd")
+
     def test_codebuddy_purge_logs_out_and_uninstalls_npm_package(self):
         with mock.patch.object(
                     checkin_cli, "_find_codebuddy_cli",

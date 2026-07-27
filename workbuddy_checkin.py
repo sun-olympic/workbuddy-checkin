@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-WorkBuddy 每日签到脚本（HTTP 直连版，macOS）
-============================================
+WorkBuddy 每日签到脚本（HTTP 直连版，macOS / Windows）
+======================================================
 原理：
     1. 从 WorkBuddy 本机日志或独立 CodeBuddy CLI 的官方登录状态中读取 Bearer token。
     2. 直接调用云端签到接口完成签到，无需 GUI、无需辅助功能授权、无需坐标校准。
@@ -25,7 +25,7 @@ WorkBuddy 每日签到脚本（HTTP 直连版，macOS）
     python3 workbuddy_checkin.py --no-retry # 关闭失败自动重试
 
 通知：
-    - 默认弹 macOS 系统通知（锁屏/后台也能看到横幅）。
+    - 默认弹 macOS / Windows 系统通知。
     - 想推到微信（任选其一或叠加）：
       ① 微信测试号（公众平台接口测试号，个人轻量、免企业认证）：填
          wx_test_appid / wx_test_secret / wx_test_touser / wx_test_template_id。
@@ -109,6 +109,21 @@ def _b64decode(seg: str) -> dict:
     return json.loads(base64.urlsafe_b64decode(seg))
 
 
+def _codebuddy_auth_paths():
+    """返回当前平台可能存在的 CodeBuddy 官方登录状态路径。"""
+    paths = list(CODEBUDDY_AUTH_PATHS)
+    if sys.platform == "win32":
+        local_app_data = os.environ.get("LOCALAPPDATA") or os.path.expanduser(
+            "~/AppData/Local"
+        )
+        paths.append(os.path.join(
+            local_app_data,
+            "CodeBuddyExtension", "Data", "Public", "auth",
+            "workbuddy-desktop.info",
+        ))
+    return tuple(dict.fromkeys(paths))
+
+
 def extract_token():
     """
     从 CodeBuddy CLI 登录状态或 WorkBuddy 主线程日志提取最新有效 token。
@@ -120,7 +135,7 @@ def extract_token():
 
     # 独立 CodeBuddy CLI 与 WorkBuddy 使用同一个 authentication id
     #（workbuddy-desktop）。优先读取它维护的官方登录状态，不复制凭证到项目配置。
-    for auth_path in CODEBUDDY_AUTH_PATHS:
+    for auth_path in _codebuddy_auth_paths():
         try:
             with open(auth_path, "r", encoding="utf-8") as auth_file:
                 state = json.load(auth_file)
@@ -195,6 +210,36 @@ def notify(title, message, cfg):
             )
         except Exception as e:
             logger.warning("桌面通知失败: %s", e)
+    elif cfg.get("desktop_notify", True) and sys.platform == "win32":
+        try:
+            def xml_escape(value):
+                return (str(value).replace("&", "&amp;").replace("<", "&lt;")
+                        .replace(">", "&gt;").replace('"', "&quot;")
+                        .replace("'", "&apos;"))
+
+            toast_xml = (
+                '<toast><visual><binding template="ToastGeneric">'
+                f"<text>{xml_escape(title)}</text>"
+                f"<text>{xml_escape(message)}</text>"
+                "</binding></visual></toast>"
+            )
+            script = (
+                "[void][Windows.UI.Notifications.ToastNotificationManager,"
+                "Windows.UI.Notifications,ContentType=WindowsRuntime];"
+                "$xml = New-Object Windows.Data.Xml.Dom.XmlDocument;"
+                f"$xml.LoadXml('{toast_xml}');"
+                "$toast = [Windows.UI.Notifications.ToastNotification]::new($xml);"
+                "[Windows.UI.Notifications.ToastNotificationManager]"
+                "::CreateToastNotifier('WorkBuddy Check-in').Show($toast);"
+            )
+            encoded = base64.b64encode(script.encode("utf-16le")).decode("ascii")
+            subprocess.run(
+                ["powershell", "-NoProfile", "-NonInteractive",
+                 "-EncodedCommand", encoded],
+                check=False, capture_output=True, timeout=10,
+            )
+        except Exception as e:
+            logger.warning("Windows 系统通知失败: %s", e)
 
     # 2) 微信推送（pushplus）
     token = (cfg.get("pushplus_token") or "").strip()

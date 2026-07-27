@@ -3,12 +3,12 @@
 """
 WorkBuddy 签到 · 命令行运行器（CLI）
 ==================================
-一个命令搞定全部配置与运行，无需手改 plist / json：
+一个命令搞定全部配置与运行，无需手改 plist / 任务计划 / json：
 
   python3 checkin_cli.py wizard                 # 交互式配置向导（逐步引导，回车用默认值，可 clear 清空）
   python3 checkin_cli.py config                 # 同上：不带参数 = 进入向导；带参数 = 命令行改单项
   python3 checkin_cli.py config   --time 09:10 --wechat <pushplus_token> [--desktop on|off] [--retries 4] [--delay 30]
-  python3 checkin_cli.py install                # 注册开机/定时任务（写入 LaunchAgents 并 bootstrap）
+  python3 checkin_cli.py install                # 注册每日定时任务和登录补跑任务
   python3 checkin_cli.py uninstall              # 卸载定时任务
   python3 checkin_cli.py uninstall --purge      # 卸载并彻底删除所有签到运行配置
   python3 checkin_cli.py status                 # 查看当前配置 / 定时 / 注册状态
@@ -17,14 +17,14 @@ WorkBuddy 签到 · 命令行运行器（CLI）
   python3 checkin_cli.py test-notify            # 发送一条测试通知（验证系统通知/微信推送）
 
 说明：
-  - 定时时间、微信绑定等都通过 `config` 写入 checkin_config.json，
-    并据此自动重写 LaunchAgents 里的 plist（StartCalendarInterval）。
+  - 定时时间、微信绑定等都通过 `config` 写入 checkin_config.json；macOS 使用
+    LaunchAgents plist，Windows 使用任务计划程序。
   - 微信推送（任选其一或叠加，均需自备账号，脚本不内置任何平台）：
       ① 微信测试号（公众平台接口测试号，个人轻量、免企业认证，推荐）：运行 wx-bind，
          脚本自动获取凭证、创建模板、识别 OpenID、保存配置并发送测试消息；用户只需扫码。
       ② pushplus（第三方聚合）：填入 pushplus.plus 的 token，站点内扫码绑定即可。
       ③ 通用 webhook：填任意服务的 URL（Server酱 / WxPusher / 自建等），适配任意推送。
-  - install / uninstall 涉及 launchctl，若在本机终端执行会真正注册；在受限沙箱里会提示手动执行。
+  - install / uninstall 在 macOS 使用 launchctl，在 Windows 使用任务计划程序。
   - 未安装 WorkBuddy 时，向导可安装独立 CodeBuddy CLI 并打开浏览器完成登录。
 """
 
@@ -40,6 +40,7 @@ import plistlib
 import shutil
 import urllib.request
 import urllib.error
+import webbrowser
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 WORKER = os.path.join(BASE_DIR, "workbuddy_checkin.py")
@@ -52,6 +53,8 @@ PLIST_NAME = "com.user.workbuddy-checkin.plist"
 PLIST_SRC = os.path.join(BASE_DIR, PLIST_NAME)
 PLIST_DST = os.path.expanduser(os.path.join("~/Library/LaunchAgents", PLIST_NAME))
 LABEL = "com.user.workbuddy-checkin"
+WINDOWS_DAILY_TASK = "WorkBuddyCheckin"
+WINDOWS_LOGON_TASK = "WorkBuddyCheckin-Logon"
 WORKBUDDY_APP_CANDIDATES = (
     "/Applications/WorkBuddy.app",
     os.path.expanduser("~/Applications/WorkBuddy.app"),
@@ -132,8 +135,57 @@ def launchctl_installed():
     return (LABEL in out), ""
 
 
+def _windows_task_exists(task_name):
+    rc, _, err = _run(["schtasks", "/Query", "/TN", task_name])
+    return rc == 0, err
+
+
+def schedule_installed():
+    """返回当前平台的定时任务是否完整注册。"""
+    if sys.platform == "win32":
+        daily, daily_error = _windows_task_exists(WINDOWS_DAILY_TASK)
+        logon, logon_error = _windows_task_exists(WINDOWS_LOGON_TASK)
+        return daily and logon, daily_error or logon_error
+    return launchctl_installed()
+
+
+def _windows_task_action():
+    """生成 Windows 任务计划程序可接受的带引号命令行。"""
+    return subprocess.list2cmdline([PY, WORKER])
+
+
+def _install_windows():
+    cfg = read_config()
+    hour = int(cfg.get("_schedule_hour", 9))
+    minute = int(cfg.get("_schedule_minute", 10))
+    action = _windows_task_action()
+    daily_command = [
+        "schtasks", "/Create", "/F",
+        "/TN", WINDOWS_DAILY_TASK,
+        "/TR", action,
+        "/SC", "DAILY", "/ST", f"{hour:02d}:{minute:02d}",
+        "/RL", "LIMITED",
+    ]
+    logon_command = [
+        "schtasks", "/Create", "/F",
+        "/TN", WINDOWS_LOGON_TASK,
+        "/TR", action,
+        "/SC", "ONLOGON",
+        "/RL", "LIMITED",
+    ]
+    for index, command in enumerate((daily_command, logon_command)):
+        rc, out, err = _run(command)
+        if rc != 0:
+            if index == 1:
+                _run(["schtasks", "/Delete", "/F", "/TN", WINDOWS_DAILY_TASK])
+            return False, err or out or "Windows 任务计划程序注册失败"
+    return True, "已注册 Windows 定时任务（每天 + 登录补跑）。"
+
+
 def install():
     """先 bootout（若已存在）再 bootstrap，确保新配置生效。"""
+    if sys.platform == "win32":
+        return _install_windows()
     # 先尝试卸载旧的（忽略错误）
     _run(["launchctl", "bootout", f"gui/{os.getuid()}/{LABEL}"])
     rc, out, err = _run(["launchctl", "bootstrap", f"gui/{os.getuid()}", PLIST_DST])
@@ -144,6 +196,22 @@ def install():
 
 
 def uninstall():
+    if sys.platform == "win32":
+        failures = []
+        removed = 0
+        for task_name in (WINDOWS_DAILY_TASK, WINDOWS_LOGON_TASK):
+            exists, _ = _windows_task_exists(task_name)
+            if not exists:
+                continue
+            rc, out, err = _run(["schtasks", "/Delete", "/F", "/TN", task_name])
+            if rc == 0:
+                removed += 1
+            else:
+                failures.append(err or out or task_name)
+        if failures:
+            return False, " | ".join(failures)
+        return True, f"已卸载 Windows 定时任务（删除 {removed} 项）。"
+
     rc, out, err = _run(["launchctl", "bootout", f"gui/{os.getuid()}/{LABEL}"])
     # 删除 LaunchAgents 里的文件
     try:
@@ -170,8 +238,36 @@ def _wxt_configured(cfg):
 
 
 def _find_workbuddy_app():
-    """返回本机 WorkBuddy.app 路径；未安装时返回空字符串。"""
-    return next((path for path in WORKBUDDY_APP_CANDIDATES if os.path.isdir(path)), "")
+    """返回当前平台的 WorkBuddy 程序路径；未安装时返回空字符串。"""
+    candidates = list(WORKBUDDY_APP_CANDIDATES)
+    if sys.platform == "win32":
+        local_app_data = os.environ.get("LOCALAPPDATA", "")
+        program_files = os.environ.get("PROGRAMFILES", "")
+        candidates = [
+            os.path.join(local_app_data, "Programs", "WorkBuddy", "WorkBuddy.exe"),
+            os.path.join(local_app_data, "WorkBuddy", "WorkBuddy.exe"),
+            os.path.join(program_files, "WorkBuddy", "WorkBuddy.exe"),
+        ]
+    return next((path for path in candidates if path and os.path.exists(path)), "")
+
+
+def _launch_workbuddy_app(app_path):
+    """启动当前平台的 WorkBuddy 客户端。"""
+    if sys.platform == "win32":
+        try:
+            subprocess.Popen([app_path])
+            return True
+        except OSError:
+            return False
+    launched = subprocess.run(["open", app_path], check=False, capture_output=True)
+    return launched.returncode == 0
+
+
+def _prepare_schedule_definition(hour, minute):
+    """macOS 预写 plist；Windows 在 install 时直接创建计划任务。"""
+    if sys.platform == "darwin":
+        return write_plist(hour, minute)
+    return ""
 
 
 def _find_codebuddy_cli():
@@ -274,10 +370,10 @@ def _run_codebuddy_preflight():
 def _run_environment_preflight():
     """配置/安装前检查环境，可选择 WorkBuddy 或独立 CLI 登录。"""
     print("=== 环境预检 ===")
-    if sys.platform != "darwin":
-        print("❌ 当前仅支持 macOS。")
+    if sys.platform not in ("darwin", "win32"):
+        print("❌ 当前仅支持 macOS 和 Windows。")
         return False
-    print("✅ 系统：macOS")
+    print(f"✅ 系统：{'Windows' if sys.platform == 'win32' else 'macOS'}")
 
     if sys.version_info < (3, 8):
         print("❌ Python 版本过低，请安装 Python 3.8 或更高版本。")
@@ -310,8 +406,7 @@ def _run_environment_preflight():
         print("❌ 无效选择，已取消环境预检。")
         return False
 
-    launched = subprocess.run(["open", app_path], check=False, capture_output=True)
-    if launched.returncode != 0:
+    if not _launch_workbuddy_app(app_path):
         print("❌ 无法自动启动 WorkBuddy，请手动打开后重试。")
         return False
     print("🔐 已启动 WorkBuddy，正在等待有效登录态（最多 180 秒）…")
@@ -375,7 +470,7 @@ def interactive_config(cfg):
 
     # 2) 系统通知（独立开关，不参与远程渠道单选）
     dft = "on" if cfg.get("desktop_notify", True) else "off"
-    d = ask("🔔 macOS 系统通知 (on/off)", dft) or dft
+    d = ask("🔔 系统通知 (on/off)", dft) or dft
     cfg["desktop_notify"] = d.lower() in ("on", "true", "1", "yes")
 
     # 3) 重试参数
@@ -491,9 +586,12 @@ def interactive_config(cfg):
         return 0
 
     write_config(cfg)
-    dst = write_plist(cfg["_schedule_hour"], cfg["_schedule_minute"])
+    dst = _prepare_schedule_definition(cfg["_schedule_hour"], cfg["_schedule_minute"])
     print(f"\n✅ 配置已保存：{CONFIG_PATH}")
-    print(f"✅ 已生成 plist：{dst}（每天 {cfg['_schedule_hour']:02d}:{cfg['_schedule_minute']:02d} + 开机补跑）")
+    if dst:
+        print(f"✅ 已生成 plist：{dst}（每天 {cfg['_schedule_hour']:02d}:{cfg['_schedule_minute']:02d} + 登录补跑）")
+    else:
+        print("✅ Windows 定时配置已就绪；执行 install 后创建“每天 + 登录补跑”任务。")
     if bind_wechat:
         print("\n🌐 正在进入微信绑定流程…")
         bind_args = argparse.Namespace(
@@ -602,14 +700,17 @@ def cmd_config(args):
 
     write_config(cfg)
 
-    # 重写 plist（若已有时间配置）
+    # macOS 重写 plist；Windows 由 install 直接更新任务计划。
     h = cfg.get("_schedule_hour")
     m = cfg.get("_schedule_minute")
     if h is not None and m is not None:
-        dst = write_plist(h, m)
-        print(f"✅ 已重写 plist：{dst}（每天 {h:02d}:{m:02d} + 开机补跑）")
+        dst = _prepare_schedule_definition(h, m)
+        if dst:
+            print(f"✅ 已重写 plist：{dst}（每天 {h:02d}:{m:02d} + 登录补跑）")
+        else:
+            print(f"✅ 已保存 Windows 定时时间：{h:02d}:{m:02d}（重新执行 install 生效）。")
     else:
-        print("ℹ️  尚未设置定时时间（用 --time HH:MM 设置后会自动生成 plist）。")
+        print("ℹ️  尚未设置定时时间（用 --time HH:MM 设置）。")
 
     if changed:
         print("📝 配置变更：")
@@ -831,7 +932,7 @@ def _try_capture_openid(page, follow_png, appid, secret):
     # 2) 降级：页面截图引导扫码（老逻辑，作为兜底）
     try:
         page.screenshot(path=follow_png)
-        subprocess.run(["open", follow_png], check=False)
+        _open_local_path(follow_png)
         print("📲 已打开「关注者二维码」截图，请用微信扫码关注测试号（关注后 OpenID 才会出现）。")
         print("   等待关注中（最多 60 秒，若已关注可忽略）…")
         for _ in range(30):
@@ -1539,12 +1640,25 @@ def cmd_wx_login(args):
 
 
 def _browser_open(url, label="沙箱页"):
-    """尝试用系统默认浏览器打开 URL（macOS: open，其他: 打印 URL）。"""
+    """尝试用当前平台的默认浏览器打开 URL。"""
     try:
-        subprocess.run(["open", url], check=False)
+        webbrowser.open(url)
         print(f"  🌐 已自动打开{label}。若未弹出，手动打开：{url}")
     except Exception:
         print(f"  🌐 请打开{label}：{url}")
+
+
+def _open_local_path(path):
+    """跨平台打开本地截图等文件。"""
+    try:
+        if sys.platform == "win32":
+            os.startfile(path)
+        elif sys.platform == "darwin":
+            subprocess.run(["open", path], check=False)
+        else:
+            webbrowser.open("file://" + os.path.abspath(path))
+    except Exception:
+        print(f"  📄 请手动打开：{path}")
 
 
 def cmd_wx_setup(args):
@@ -1697,9 +1811,12 @@ def _wx_setup_confirm_and_send(cfg, appid, secret, openid, template_id):
 
     h = cfg.get("_schedule_hour", 9)
     m = cfg.get("_schedule_minute", 10)
-    dst = write_plist(h, m)
+    dst = _prepare_schedule_definition(h, m)
     print(f"\n✅ 配置已保存：{CONFIG_PATH}")
-    print(f"✅ 已生成 plist：{dst}")
+    if dst:
+        print(f"✅ 已生成 plist：{dst}")
+    else:
+        print("✅ Windows 定时配置已保存；执行 install 后生效。")
 
     print("\n🔔 正在发送测试通知到你的微信…")
     import importlib.util
@@ -1880,7 +1997,7 @@ def cmd_install(args):
     if not _run_environment_preflight():
         print("❌ 环境预检未通过，未注册定时任务。")
         return 1
-    if not os.path.exists(PLIST_DST):
+    if sys.platform == "darwin" and not os.path.exists(PLIST_DST):
         # 没有 plist 时尝试从 config 生成
         cfg = read_config()
         h = cfg.get("_schedule_hour", 9)
@@ -1995,9 +2112,12 @@ def cmd_status(args):
     print(f"  最大重试      : {max_retries}")
     print(f"  退避基数      : {retry_delay}")
     print(f"  worker 脚本   : {WORKER}")
-    plist_status = PLIST_DST if os.path.isfile(PLIST_DST) else f"{PLIST_DST}（文件不存在）"
-    print(f"  plist 位置    : {plist_status}")
-    installed, _ = launchctl_installed()
+    if sys.platform == "darwin":
+        plist_status = PLIST_DST if os.path.isfile(PLIST_DST) else f"{PLIST_DST}（文件不存在）"
+        print(f"  plist 位置    : {plist_status}")
+    elif sys.platform == "win32":
+        print(f"  计划任务      : {WINDOWS_DAILY_TASK} / {WINDOWS_LOGON_TASK}")
+    installed, _ = schedule_installed()
     print(f"  定时注册状态  : {'已注册 ✓' if installed else '未注册（执行 install）'}")
     return 0
 
@@ -2093,7 +2213,7 @@ def build_parser():
     pws = sub.add_parser("wx-setup", help="微信测试号一键配置（纯 API + 少量手动粘贴，不依赖浏览器）：贴 appid/secret → 自动拉 OpenID → 贴模板 ID → 保存并测试推送")
     pws.set_defaults(func=cmd_wx_setup)
 
-    pi = sub.add_parser("install", help="注册定时任务（写入 LaunchAgents 并 bootstrap）")
+    pi = sub.add_parser("install", help="注册每日定时任务和登录补跑任务")
     pi.set_defaults(func=cmd_install)
 
     pu = sub.add_parser("uninstall", help="卸载定时任务")

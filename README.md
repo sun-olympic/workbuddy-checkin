@@ -1,10 +1,10 @@
-# WorkBuddy 自动签到（macOS）
+# WorkBuddy 自动签到（macOS / Windows）
 
-通过 WorkBuddy HTTP 接口每日自动签到，无需保持 WorkBuddy 窗口运行或授予辅助功能权限，也支持完全不安装 WorkBuddy。支持 macOS 通知、微信测试号、pushplus 和 webhook。
+通过 WorkBuddy HTTP 接口每日自动签到，无需保持 WorkBuddy 窗口运行或授予辅助功能权限，也支持完全不安装 WorkBuddy。支持 macOS/Windows 通知、微信测试号、pushplus 和 webhook。
 
 ## 环境预检
 
-`wizard` 和 `install` 会先检查 macOS、Python 3.8+ 和有效登录态。没有登录态时可选择：
+`wizard` 和 `install` 会先检查 macOS/Windows、Python 3.8+ 和有效登录态。没有登录态时可选择：
 
 - **WorkBuddy 模式**：自动打开已安装的 WorkBuddy，等待登录完成。
 - **无 WorkBuddy 模式**：使用独立 CodeBuddy CLI 打开浏览器登录；未安装 CLI 时，向导可通过 npm 自动安装。
@@ -29,6 +29,18 @@ python3 checkin_cli.py test-notify
 python3 checkin_cli.py status
 ```
 
+Windows PowerShell 中把 `python3` 换成 `python`：
+
+```powershell
+cd C:\path\to\workbuddy-checkin
+python checkin_cli.py wizard
+python checkin_cli.py install
+python checkin_cli.py test-notify
+python checkin_cli.py status
+```
+
+Windows 的 `install` 会创建 `WorkBuddyCheckin`（每日）和 `WorkBuddyCheckin-Logon`（登录补跑）两个任务计划。若系统提示“拒绝访问”，请用“以管理员身份运行”的 PowerShell 重试 `install`。
+
 `config` 不带参数时与 `wizard` 等价。状态中必须显示“定时注册状态：已注册”，否则到点不会执行。
 
 ## 无 WorkBuddy 模式
@@ -44,7 +56,7 @@ python3 checkin_cli.py wizard
 3. 打开浏览器，等待用户完成一次扫码/授权。
 4. 获取有效登录态后继续配置。
 
-此模式需要 Node.js 18.20.8+ 和 npm，但不需要安装或运行 WorkBuddy。
+此模式需要 Node.js 18.20.8+ 和 npm，但不需要安装或运行 WorkBuddy。CodeBuddy CLI 2.127.2 的 npm 包下载约 2.2 MB、解压约 111 MB；Node.js 占用不包含在内。
 
 ## 绑定微信
 
@@ -74,7 +86,7 @@ python3 checkin_cli.py wx-bind --mode manual
 
 ## 通知与重试
 
-- macOS 系统通知是独立开关，不参与远程通知单选。
+- macOS/Windows 系统通知是独立开关，不参与远程通知单选。
 - 远程通知只能选择一种：微信测试号、pushplus、webhook 或不使用。
 - 首次临时失败会立即通知“正在重试”，重试结束后再通知最终结果。
 - 如果用户当天已签到，仍会通知“此前已签到，本次未执行自动签到”。
@@ -93,7 +105,7 @@ python3 checkin_cli.py wx-bind --mode manual
 | 卸载定时任务，保留配置 | `python3 checkin_cli.py uninstall` |
 | 彻底清理运行数据 | `python3 checkin_cli.py uninstall --purge` |
 
-彻底清理会删除配置、微信凭证/token 缓存、plist、日志、截图、Python/测试缓存和 Playwright 专用环境；项目源码保留。
+彻底清理会删除任务计划或 plist，以及配置、微信凭证/token 缓存、日志、截图、Python/测试缓存和 Playwright 专用环境；项目源码保留。
 
 ## 删除定时任务
 
@@ -103,6 +115,13 @@ python3 checkin_cli.py uninstall
 
 # 删除定时任务并彻底清理所有签到相关配置
 python3 checkin_cli.py uninstall --purge
+```
+
+Windows PowerShell：
+
+```powershell
+python checkin_cli.py uninstall
+python checkin_cli.py uninstall --purge
 ```
 
 彻底清理不会删除独立 CodeBuddy CLI 及其账号登录状态，以免影响 CodeBuddy 的正常使用。

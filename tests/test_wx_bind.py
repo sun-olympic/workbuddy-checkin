@@ -235,6 +235,16 @@ class WxBindHelpersTest(unittest.TestCase):
 
 
 class EnvironmentPreflightTest(unittest.TestCase):
+    def test_windows_ready_environment_passes_without_workbuddy(self):
+        with mock.patch.object(checkin_cli.sys, "platform", "win32"), \
+                mock.patch.object(checkin_cli, "_workbuddy_token_ready", return_value=True), \
+                mock.patch.object(checkin_cli, "_find_workbuddy_app") as find_app, \
+                redirect_stdout(StringIO()):
+            result = checkin_cli._run_environment_preflight()
+
+        self.assertTrue(result)
+        find_app.assert_not_called()
+
     def test_ready_environment_passes_without_opening_workbuddy(self):
         preflight = getattr(checkin_cli, "_run_environment_preflight", None)
         self.assertIsNotNone(preflight)
@@ -424,6 +434,103 @@ class PurgeUninstallTest(unittest.TestCase):
         self.assertIn("最大重试      : 未配置", status)
         self.assertIn("退避基数      : 未配置", status)
         self.assertNotIn("兼容模式", status)
+
+
+class WindowsSupportTest(unittest.TestCase):
+    def test_windows_install_creates_daily_and_logon_tasks(self):
+        action = checkin_cli.subprocess.list2cmdline([
+            checkin_cli.PY, checkin_cli.WORKER,
+        ])
+        with mock.patch.object(checkin_cli.sys, "platform", "win32"), \
+                mock.patch.object(checkin_cli, "read_config", return_value={
+                    "_schedule_hour": 7,
+                    "_schedule_minute": 5,
+                }), \
+                mock.patch.object(
+                    checkin_cli, "_run",
+                    side_effect=[(0, "", ""), (0, "", "")],
+                ) as run:
+            ok, _ = checkin_cli.install()
+
+        self.assertTrue(ok)
+        self.assertEqual(run.call_args_list, [
+            mock.call([
+                "schtasks", "/Create", "/F",
+                "/TN", checkin_cli.WINDOWS_DAILY_TASK,
+                "/TR", action,
+                "/SC", "DAILY", "/ST", "07:05",
+                "/RL", "LIMITED",
+            ]),
+            mock.call([
+                "schtasks", "/Create", "/F",
+                "/TN", checkin_cli.WINDOWS_LOGON_TASK,
+                "/TR", action,
+                "/SC", "ONLOGON",
+                "/RL", "LIMITED",
+            ]),
+        ])
+
+    def test_windows_uninstall_removes_both_tasks(self):
+        with mock.patch.object(checkin_cli.sys, "platform", "win32"), \
+                mock.patch.object(checkin_cli, "_run", side_effect=[
+                    (0, "exists", ""), (0, "deleted", ""),
+                    (0, "exists", ""), (0, "deleted", ""),
+                ]) as run:
+            ok, _ = checkin_cli.uninstall()
+
+        self.assertTrue(ok)
+        self.assertEqual(run.call_args_list, [
+            mock.call(["schtasks", "/Query", "/TN", checkin_cli.WINDOWS_DAILY_TASK]),
+            mock.call(["schtasks", "/Delete", "/F", "/TN", checkin_cli.WINDOWS_DAILY_TASK]),
+            mock.call(["schtasks", "/Query", "/TN", checkin_cli.WINDOWS_LOGON_TASK]),
+            mock.call(["schtasks", "/Delete", "/F", "/TN", checkin_cli.WINDOWS_LOGON_TASK]),
+        ])
+
+    def test_windows_schedule_status_requires_both_tasks(self):
+        with mock.patch.object(checkin_cli.sys, "platform", "win32"), \
+                mock.patch.object(checkin_cli, "_run", side_effect=[
+                    (0, "daily", ""), (0, "logon", ""),
+                ]) as run:
+            installed, error = checkin_cli.schedule_installed()
+
+        self.assertTrue(installed)
+        self.assertEqual(error, "")
+        self.assertEqual(run.call_count, 2)
+
+    def test_windows_configuration_does_not_write_macos_plist(self):
+        with mock.patch.object(checkin_cli.sys, "platform", "win32"), \
+                mock.patch.object(checkin_cli, "write_plist") as write_plist:
+            result = checkin_cli._prepare_schedule_definition(9, 10)
+
+        self.assertEqual(result, "")
+        write_plist.assert_not_called()
+
+    def test_windows_codebuddy_auth_path_uses_local_app_data(self):
+        local_app_data = r"C:\Users\tester\AppData\Local"
+        with mock.patch.object(worker.sys, "platform", "win32"), \
+                mock.patch.dict(worker.os.environ, {"LOCALAPPDATA": local_app_data}):
+            paths = worker._codebuddy_auth_paths()
+
+        self.assertIn(
+            worker.os.path.join(
+                local_app_data, "CodeBuddyExtension", "Data", "Public", "auth",
+                "workbuddy-desktop.info",
+            ),
+            paths,
+        )
+
+    def test_windows_desktop_notification_uses_powershell(self):
+        with mock.patch.object(worker.sys, "platform", "win32"), \
+                mock.patch.object(worker.subprocess, "run") as run:
+            worker.notify("签到通知", "签到成功", {
+                "desktop_notify": True,
+                "notify_channel": "none",
+            })
+
+        run.assert_called_once()
+        command = run.call_args.args[0]
+        self.assertEqual(command[0], "powershell")
+        self.assertIn("-EncodedCommand", command)
 
 
 class WxBindingVerificationTest(unittest.TestCase):

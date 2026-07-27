@@ -2,6 +2,7 @@ import importlib.util
 import base64
 import json
 import pathlib
+import signal
 import stat
 import tempfile
 import time
@@ -265,6 +266,7 @@ class EnvironmentPreflightTest(unittest.TestCase):
 
     def test_macos_codebuddy_login_types_slash_command_in_cli_terminal(self):
         process = mock.Mock()
+        process.pid = 4242
         process.poll.return_value = None
         with mock.patch.object(checkin_cli.sys, "platform", "darwin"), \
                 mock.patch.object(
@@ -276,6 +278,7 @@ class EnvironmentPreflightTest(unittest.TestCase):
                 mock.patch.object(
                     checkin_cli, "_wait_for_codebuddy_login", return_value=True,
                 ), \
+                mock.patch.object(checkin_cli.os, "killpg") as killpg, \
                 redirect_stdout(StringIO()):
             result = checkin_cli._launch_codebuddy_login_and_wait(
                 "/usr/local/bin/codebuddy"
@@ -322,7 +325,9 @@ class EnvironmentPreflightTest(unittest.TestCase):
         )
         self.assertIn("trustAll", child_env["WORKBUDDY_CODEBUDDY_SETTINGS"])
         self.assertNotIn("stdin", popen.call_args.kwargs)
-        process.terminate.assert_called_once_with()
+        self.assertTrue(popen.call_args.kwargs.get("start_new_session"))
+        killpg.assert_called_once_with(4242, signal.SIGTERM)
+        process.terminate.assert_not_called()
 
     def test_windows_codebuddy_login_sends_slash_command_over_stdin(self):
         process = mock.Mock()

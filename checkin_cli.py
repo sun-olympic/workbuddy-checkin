@@ -31,6 +31,7 @@ WorkBuddy 签到 · 命令行运行器（CLI）
 
 import os
 import re
+import signal
 import sys
 import json
 import time
@@ -373,6 +374,7 @@ def _launch_codebuddy_login_and_wait(cli_path):
         signal_path = os.path.join(temp_dir, "auth-success")
         settings = _codebuddy_login_settings(signal_path)
         process = None
+        uses_process_group = False
         try:
             expect = shutil.which("expect") if sys.platform == "darwin" else ""
             if expect:
@@ -409,9 +411,10 @@ def _launch_codebuddy_login_and_wait(cli_path):
                 child_env = os.environ.copy()
                 child_env["WORKBUDDY_CODEBUDDY_CLI"] = cli_path
                 child_env["WORKBUDDY_CODEBUDDY_SETTINGS"] = settings
+                uses_process_group = True
                 process = subprocess.Popen([
                     expect, "-c", expect_script,
-                ], cwd=BASE_DIR, env=child_env)
+                ], cwd=BASE_DIR, env=child_env, start_new_session=True)
             else:
                 process = subprocess.Popen([
                     cli_path, "--settings", settings,
@@ -427,11 +430,25 @@ def _launch_codebuddy_login_and_wait(cli_path):
         try:
             ready = _wait_for_codebuddy_login(process, signal_path)
         finally:
-            if process.poll() is None:
-                process.terminate()
+            if uses_process_group:
                 try:
-                    process.wait(timeout=5)
-                except subprocess.TimeoutExpired:
+                    os.killpg(process.pid, signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
+                except OSError:
+                    if process.poll() is None:
+                        process.terminate()
+            elif process.poll() is None:
+                process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                if uses_process_group:
+                    try:
+                        os.killpg(process.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                else:
                     process.kill()
     if not ready:
         print("❌ 等待登录超时。请确认浏览器授权成功后重试。")

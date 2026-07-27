@@ -50,6 +50,10 @@ PLIST_NAME = "com.user.workbuddy-checkin.plist"
 PLIST_SRC = os.path.join(BASE_DIR, PLIST_NAME)
 PLIST_DST = os.path.expanduser(os.path.join("~/Library/LaunchAgents", PLIST_NAME))
 LABEL = "com.user.workbuddy-checkin"
+WORKBUDDY_APP_CANDIDATES = (
+    "/Applications/WorkBuddy.app",
+    os.path.expanduser("~/Applications/WorkBuddy.app"),
+)
 
 # 用运行本 CLI 的 python 执行 worker（worker 仅用标准库，任意 python 皆可）
 PY = sys.executable
@@ -162,8 +166,85 @@ def _wxt_configured(cfg):
                 and (cfg.get("wx_test_template_id") or "").strip())
 
 
+def _find_workbuddy_app():
+    """返回本机 WorkBuddy.app 路径；未安装时返回空字符串。"""
+    return next((path for path in WORKBUDDY_APP_CANDIDATES if os.path.isdir(path)), "")
+
+
+def _workbuddy_token_ready():
+    """检查 WorkBuddy 是否已产生可用于签到的未过期登录 token。"""
+    try:
+        import importlib
+        worker = importlib.import_module("workbuddy_checkin")
+        return bool(worker.extract_token())
+    except Exception:
+        return False
+
+
+def _wait_for_workbuddy_token(timeout_seconds=180, poll_seconds=2):
+    """等待 WorkBuddy 登录后把有效 token 写入日志。"""
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        if _workbuddy_token_ready():
+            return True
+        time.sleep(poll_seconds)
+    return _workbuddy_token_ready()
+
+
+def _run_environment_preflight():
+    """配置/安装前检查运行环境，必要时自动启动 WorkBuddy。"""
+    print("=== 环境预检 ===")
+    if sys.platform != "darwin":
+        print("❌ 当前仅支持 macOS。")
+        return False
+    print("✅ 系统：macOS")
+
+    if sys.version_info < (3, 8):
+        print("❌ Python 版本过低，请安装 Python 3.8 或更高版本。")
+        return False
+    print(f"✅ Python：{sys.version_info.major}.{sys.version_info.minor}")
+
+    app_path = _find_workbuddy_app()
+    if not app_path:
+        print("❌ 未找到 WorkBuddy.app，请先安装 WorkBuddy。")
+        return False
+    print(f"✅ WorkBuddy：{app_path}")
+
+    if _workbuddy_token_ready():
+        print("✅ 登录态：已找到有效 token")
+        print("✅ 环境预检通过。\n")
+        return True
+
+    print("⚠️  未找到有效登录 token。")
+    print("   可由向导自动启动 WorkBuddy；若尚未登录，只需在 WorkBuddy 完成登录。")
+    try:
+        answer = input("是否自动启动 WorkBuddy 并等待登录态？[Y/n]: ").strip().lower()
+    except EOFError:
+        answer = "n"
+    if answer in ("n", "no"):
+        print("❌ 已取消；没有 WorkBuddy 登录态无法执行签到。")
+        return False
+
+    launched = subprocess.run(["open", app_path], check=False, capture_output=True)
+    if launched.returncode != 0:
+        print("❌ 无法自动启动 WorkBuddy，请手动打开后重试。")
+        return False
+    print("🔐 已启动 WorkBuddy，正在等待有效登录态（最多 180 秒）…")
+    if not _wait_for_workbuddy_token():
+        print("❌ 等待超时。请确认 WorkBuddy 已登录并产生请求日志后重试。")
+        return False
+
+    print("✅ 登录态：已自动获取有效 token")
+    print("✅ 环境预检通过。\n")
+    return True
+
+
 def interactive_config(cfg):
     """交互式向导：逐步询问，回车用默认值；输入 clear 可清空某项。"""
+    if not _run_environment_preflight():
+        print("❌ 环境预检未通过，未写入配置。")
+        return 1
+
     def ask(prompt, default=""):
         try:
             val = input(f"{prompt} [{default}]: ").strip()
@@ -1711,6 +1792,9 @@ def _wx_verify_and_fix_template(cfg, appid, secret, template_id):
 
 
 def cmd_install(args):
+    if not _run_environment_preflight():
+        print("❌ 环境预检未通过，未注册定时任务。")
+        return 1
     if not os.path.exists(PLIST_DST):
         # 没有 plist 时尝试从 config 生成
         cfg = read_config()

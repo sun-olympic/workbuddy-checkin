@@ -2,11 +2,15 @@
 
 通过 WorkBuddy HTTP 接口每日自动签到，无需打开 WorkBuddy 窗口或授予辅助功能权限。支持 macOS 通知、微信测试号、pushplus 和 webhook。
 
-## 使用前提
+## 环境预检
 
-- WorkBuddy 至少登录并运行过一次，脚本需从 `~/.workbuddy/logs` 获取登录态。
-- macOS 已安装 Python 3。
-- 自动绑定微信时建议已安装 Chrome；Playwright 会自动安装到项目专用环境。
+`wizard` 和 `install` 会先检查 macOS、Python 3.8+、WorkBuddy.app 和有效登录 token。如果 WorkBuddy 从未启动或尚未产生 token，向导会自动启动 WorkBuddy 并等待最多 180 秒：
+
+- 本机已登录 WorkBuddy：通常无需手动操作。
+- 首次使用：只需在自动打开的 WorkBuddy 中完成登录。
+- 没有有效登录态时无法零交互签到，因为签到接口必须携带 WorkBuddy Bearer token。
+
+自动绑定微信时建议已安装 Chrome；Playwright 会自动安装到项目专用环境。
 
 ## 快速开始
 

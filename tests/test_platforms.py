@@ -1,4 +1,5 @@
 import os
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -59,6 +60,38 @@ class WindowsPlatformTest(unittest.TestCase):
             "schtasks", "/Create", "/F", "/TN",
         ])
         self.assertIn("07:05", run.call_args_list[0].args[0])
+
+    def test_scheduler_uses_pythonw_to_avoid_console_window(self):
+        run = mock.Mock(side_effect=[(0, "", ""), (0, "", "")])
+
+        with mock.patch(
+            "workbuddy_platform.windows.os.path.isfile",
+            side_effect=lambda path: path == r"C:\Python\pythonw.exe",
+        ):
+            self.platform.install_schedule({}, run)
+
+        daily_command = run.call_args_list[0].args[0]
+        action = daily_command[daily_command.index("/TR") + 1]
+        self.assertIn(r"C:\Python\pythonw.exe", action)
+        self.assertNotIn(r"C:\Python\python.exe", action)
+
+    def test_workbuddy_is_found_from_registry_when_installed_elsewhere(self):
+        custom_path = r"D:\Apps\WorkBuddy\WorkBuddy.exe"
+        registry = mock.MagicMock()
+        registry.HKEY_CURRENT_USER = object()
+        registry.HKEY_LOCAL_MACHINE = object()
+        registry.OpenKey.return_value.__enter__.return_value = "app-path-key"
+        registry.QueryValueEx.return_value = (custom_path, 1)
+        registry.EnumKey.side_effect = OSError
+
+        with mock.patch.dict(sys.modules, {"winreg": registry}), \
+                mock.patch(
+                    "workbuddy_platform.windows.os.path.exists",
+                    side_effect=lambda path: path == custom_path,
+                ):
+            result = self.platform.find_workbuddy_app(())
+
+        self.assertEqual(result, custom_path)
 
     def test_runtime_paths_use_windows_layout(self):
         with mock.patch.dict(os.environ, {

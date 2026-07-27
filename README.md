@@ -111,6 +111,14 @@ python checkin_cli.py status
 ```
 
 Windows 的 `install` 会创建 `WorkBuddyCheckin`（每日）和 `WorkBuddyCheckin-Logon`（登录补跑）两个任务计划。若系统提示“拒绝访问”，请用“以管理员身份运行”的 PowerShell 重试 `install`。
+计划任务会使用 `pythonw.exe` 静默运行；从旧版升级后请重新执行一次 `python checkin_cli.py install` 更新已有任务。
+
+WorkBuddy 安装在非默认目录时，向导会通过 Windows 注册表自动发现。便携版或未写入注册表时，可先指定程序路径：
+
+```powershell
+$env:WORKBUDDY_PATH = "D:\Apps\WorkBuddy\WorkBuddy.exe"
+python checkin_cli.py wizard
+```
 
 `config` 不带参数时与 `wizard` 等价。状态中必须显示“定时注册状态：已注册”，否则到点不会执行。
 

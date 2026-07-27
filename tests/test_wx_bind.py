@@ -1089,6 +1089,10 @@ class WindowsSupportTest(unittest.TestCase):
         command = run.call_args.args[0]
         self.assertEqual(command[0], "powershell")
         self.assertIn("-EncodedCommand", command)
+        self.assertEqual(
+            run.call_args.kwargs["creationflags"],
+            0x08000000,
+        )
 
 
 class WxBindingVerificationTest(unittest.TestCase):

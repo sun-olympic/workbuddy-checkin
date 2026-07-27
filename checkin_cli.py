@@ -31,7 +31,6 @@ WorkBuddy 签到 · 命令行运行器（CLI）
 
 import os
 import re
-import signal
 import sys
 import json
 import time
@@ -41,11 +40,15 @@ import tempfile
 import plistlib
 import shutil
 import shlex
-import socket
-import stat
 import urllib.request
 import urllib.error
 import webbrowser
+
+from workbuddy_platform import (
+    SchedulerSettings,
+    UnsupportedPlatformError,
+    get_platform,
+)
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 WORKER = os.path.join(BASE_DIR, "workbuddy_checkin.py")
@@ -127,7 +130,7 @@ def write_plist(hour, minute):
     return PLIST_DST
 
 
-# ------------------------- launchctl 封装 -------------------------
+# ------------------------- 平台适配 -------------------------
 def _run(cmd):
     """执行命令，返回 (returncode, stdout, stderr)。"""
     try:
@@ -137,104 +140,33 @@ def _run(cmd):
         return -1, "", str(e)
 
 
-def launchctl_installed():
-    rc, out, err = _run(["launchctl", "list"])
-    if rc != 0:
-        return False, err
-    return (LABEL in out), ""
+def _scheduler_settings():
+    return SchedulerSettings(
+        python_executable=PY,
+        worker_path=WORKER,
+        label=LABEL,
+        plist_path=PLIST_DST,
+        daily_task=WINDOWS_DAILY_TASK,
+        logon_task=WINDOWS_LOGON_TASK,
+    )
 
 
-def _windows_task_exists(task_name):
-    rc, _, err = _run(["schtasks", "/Query", "/TN", task_name])
-    return rc == 0, err
+def _platform_adapter():
+    return get_platform(sys.platform, _scheduler_settings())
 
 
 def schedule_installed():
     """返回当前平台的定时任务是否完整注册。"""
-    if sys.platform == "win32":
-        daily, daily_error = _windows_task_exists(WINDOWS_DAILY_TASK)
-        logon, logon_error = _windows_task_exists(WINDOWS_LOGON_TASK)
-        return daily and logon, daily_error or logon_error
-    return launchctl_installed()
-
-
-def _windows_task_action():
-    """生成 Windows 任务计划程序可接受的带引号命令行。"""
-    return subprocess.list2cmdline([PY, WORKER])
-
-
-def _install_windows():
-    cfg = read_config()
-    hour = int(cfg.get("_schedule_hour", 9))
-    minute = int(cfg.get("_schedule_minute", 10))
-    action = _windows_task_action()
-    daily_command = [
-        "schtasks", "/Create", "/F",
-        "/TN", WINDOWS_DAILY_TASK,
-        "/TR", action,
-        "/SC", "DAILY", "/ST", f"{hour:02d}:{minute:02d}",
-        "/RL", "LIMITED",
-    ]
-    logon_command = [
-        "schtasks", "/Create", "/F",
-        "/TN", WINDOWS_LOGON_TASK,
-        "/TR", action,
-        "/SC", "ONLOGON",
-        "/RL", "LIMITED",
-    ]
-    for index, command in enumerate((daily_command, logon_command)):
-        rc, out, err = _run(command)
-        if rc != 0:
-            if index == 1:
-                _run(["schtasks", "/Delete", "/F", "/TN", WINDOWS_DAILY_TASK])
-            return False, err or out or "Windows 任务计划程序注册失败"
-    return True, "已注册 Windows 定时任务（每天 + 登录补跑）。"
+    return _platform_adapter().schedule_installed(_run)
 
 
 def install():
-    """先 bootout（若已存在）再 bootstrap，确保新配置生效。"""
-    if sys.platform == "win32":
-        return _install_windows()
-    # 先尝试卸载旧的（忽略错误）
-    _run(["launchctl", "bootout", f"gui/{os.getuid()}/{LABEL}"])
-    rc, out, err = _run(["launchctl", "bootstrap", f"gui/{os.getuid()}", PLIST_DST])
-    if rc == 0:
-        return True, "已注册定时任务（每天 + 开机/登录补跑）。"
-    return False, (err or out or "未知错误") + "\n   请在本机终端手动执行：" \
-        f"\n   launchctl bootstrap gui/{os.getuid()} {PLIST_DST}"
+    """按当前平台注册每日任务和登录补跑任务。"""
+    return _platform_adapter().install_schedule(read_config(), _run)
 
 
 def uninstall():
-    if sys.platform == "win32":
-        failures = []
-        removed = 0
-        for task_name in (WINDOWS_DAILY_TASK, WINDOWS_LOGON_TASK):
-            exists, _ = _windows_task_exists(task_name)
-            if not exists:
-                continue
-            rc, out, err = _run(["schtasks", "/Delete", "/F", "/TN", task_name])
-            if rc == 0:
-                removed += 1
-            else:
-                failures.append(err or out or task_name)
-        if failures:
-            return False, " | ".join(failures)
-        return True, f"已卸载 Windows 定时任务（删除 {removed} 项）。"
-
-    rc, out, err = _run(["launchctl", "bootout", f"gui/{os.getuid()}/{LABEL}"])
-    # 删除 LaunchAgents 里的文件
-    try:
-        if os.path.exists(PLIST_DST):
-            os.remove(PLIST_DST)
-    except Exception as e:
-        err += f" | 删除文件失败: {e}"
-    not_loaded = any(text in (err or out).lower() for text in (
-        "no such process", "could not find specified service", "service not found",
-    ))
-    if rc == 0 or not_loaded:
-        return True, "已卸载定时任务并移除 plist。"
-    return False, (err or out or "未知错误") + "\n   如提示未注册可忽略；本机也可手动：" \
-        f"\n   launchctl bootout gui/{os.getuid()}/{LABEL}"
+    return _platform_adapter().uninstall_schedule(_run)
 
 
 # ------------------------- 子命令实现 -------------------------
@@ -248,35 +180,17 @@ def _wxt_configured(cfg):
 
 def _find_workbuddy_app():
     """返回当前平台的 WorkBuddy 程序路径；未安装时返回空字符串。"""
-    candidates = list(WORKBUDDY_APP_CANDIDATES)
-    if sys.platform == "win32":
-        local_app_data = os.environ.get("LOCALAPPDATA", "")
-        program_files = os.environ.get("PROGRAMFILES", "")
-        candidates = [
-            os.path.join(local_app_data, "Programs", "WorkBuddy", "WorkBuddy.exe"),
-            os.path.join(local_app_data, "WorkBuddy", "WorkBuddy.exe"),
-            os.path.join(program_files, "WorkBuddy", "WorkBuddy.exe"),
-        ]
-    return next((path for path in candidates if path and os.path.exists(path)), "")
+    return _platform_adapter().find_workbuddy_app(WORKBUDDY_APP_CANDIDATES)
 
 
 def _launch_workbuddy_app(app_path):
     """启动当前平台的 WorkBuddy 客户端。"""
-    if sys.platform == "win32":
-        try:
-            subprocess.Popen([app_path])
-            return True
-        except OSError:
-            return False
-    launched = subprocess.run(["open", app_path], check=False, capture_output=True)
-    return launched.returncode == 0
+    return _platform_adapter().launch_workbuddy_app(app_path)
 
 
 def _prepare_schedule_definition(hour, minute):
     """macOS 预写 plist；Windows 在 install 时直接创建计划任务。"""
-    if sys.platform == "darwin":
-        return write_plist(hour, minute)
-    return ""
+    return _platform_adapter().prepare_schedule(hour, minute, write_plist)
 
 
 def _find_codebuddy_cli():
@@ -286,11 +200,7 @@ def _find_codebuddy_cli():
 
 def _find_npm_cli():
     """返回 npm 可执行文件；Windows 避开受 PowerShell 策略限制的 npm.ps1。"""
-    candidates = (
-        ("npm.cmd", "npm.exe", "npm")
-        if sys.platform == "win32" else ("npm",)
-    )
-    return next((path for name in candidates if (path := shutil.which(name))), "")
+    return _platform_adapter().find_npm(shutil.which)
 
 
 def _ensure_codebuddy_cli():
@@ -303,7 +213,7 @@ def _ensure_codebuddy_cli():
     print("⚠️  未找到独立 CodeBuddy CLI（无 WorkBuddy 模式需要它完成登录）。")
     npm = _find_npm_cli()
     if not npm:
-        npm_command = "npm.cmd" if sys.platform == "win32" else "npm"
+        npm_command = _platform_adapter().npm_command
         print("❌ 未找到 npm。请先安装 Node.js 18.20.8+，然后执行：")
         print(f"   {npm_command} install -g {CODEBUDDY_NPM_PACKAGE}")
         return ""
@@ -312,7 +222,7 @@ def _ensure_codebuddy_cli():
     except EOFError:
         answer = "n"
     if answer in ("n", "no"):
-        npm_command = "npm.cmd" if sys.platform == "win32" else "npm"
+        npm_command = _platform_adapter().npm_command
         print(f"❌ 已取消。可稍后手动执行：{npm_command} install -g {CODEBUDDY_NPM_PACKAGE}")
         return ""
 
@@ -387,151 +297,18 @@ def _launch_codebuddy_login_and_wait(cli_path):
     with tempfile.TemporaryDirectory(prefix="workbuddy-login-") as temp_dir:
         signal_path = os.path.join(temp_dir, "auth-success")
         settings = _codebuddy_login_settings(signal_path)
-        process = None
-        uses_process_group = False
         try:
-            if sys.platform == "win32":
-                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
-                    probe.bind(("127.0.0.1", 0))
-                    port = probe.getsockname()[1]
-                base_url = f"http://127.0.0.1:{port}"
-                process = subprocess.Popen([
-                    cli_path,
-                    "--serve",
-                    "--host", "127.0.0.1",
-                    "--port", str(port),
-                    "--settings", settings,
-                ], cwd=BASE_DIR, stdin=subprocess.DEVNULL,
-                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-
-                status = None
-                deadline = time.monotonic() + 15
-                while time.monotonic() < deadline:
-                    try:
-                        request = urllib.request.Request(
-                            f"{base_url}/api/v1/auth/account/status",
-                            headers={"x-codebuddy-request": "1"},
-                            method="GET",
-                        )
-                        with urllib.request.urlopen(request, timeout=2) as response:
-                            payload = json.loads(response.read().decode("utf-8"))
-                        status = payload.get("data", payload)
-                        break
-                    except (OSError, ValueError, urllib.error.URLError):
-                        if process.poll() not in (None, 0):
-                            break
-                        time.sleep(0.25)
-
-                login_methods = (status or {}).get("loginMethods") or []
-                method_ids = {item.get("id") for item in login_methods}
-                if "internal" not in method_ids:
-                    if process.poll() is None:
-                        process.terminate()
-                    print("❌ CodeBuddy 登录服务未返回国内站登录入口，请重试。")
-                    return False
-
-                request = urllib.request.Request(
-                    f"{base_url}/api/v1/auth/account/login",
-                    data=json.dumps({"method": "internal"}).encode("utf-8"),
-                    headers={
-                        "x-codebuddy-request": "1",
-                        "Content-Type": "application/json",
-                    },
-                    method="POST",
-                )
-                with urllib.request.urlopen(request, timeout=5) as response:
-                    payload = json.loads(response.read().decode("utf-8"))
-                login_data = payload.get("data", payload)
-                auth_url = login_data.get("authUrl", "")
-                if not login_data.get("success"):
-                    if process.poll() is None:
-                        process.terminate()
-                    print("❌ CodeBuddy 未能启动浏览器登录，请重试。")
-                    return False
-
-                if auth_url:
-                    try:
-                        os.startfile(auth_url)
-                    except OSError:
-                        webbrowser.open(auth_url)
-                    print("🌐 已打开 CodeBuddy 国内站登录页，请在浏览器完成授权。")
-                else:
-                    print("🌐 CodeBuddy 已触发国内站登录，请在浏览器完成授权。")
-            else:
-                expect = shutil.which("expect") if sys.platform == "darwin" else ""
-            if sys.platform != "win32" and expect:
-                expect_script = (
-                    'spawn -noecho $env(WORKBUDDY_CODEBUDDY_CLI) '
-                    '--settings $env(WORKBUDDY_CODEBUDDY_SETTINGS)\n'
-                    'set timeout 45\n'
-                    'expect {\n'
-                    '  -re {Select login method} {}\n'
-                    '  timeout { exit 124 }\n'
-                    '  eof { exit 125 }\n'
-                    '}\n'
-                    'set timeout 20\n'
-                    'expect {\n'
-                    '  -re {Enter to login} {}\n'
-                    '  timeout { exit 126 }\n'
-                    '  eof { exit 127 }\n'
-                    '}\n'
-                    'set timeout 2\n'
-                    'expect {\n'
-                    '  -re {Enter to login} { exp_continue }\n'
-                    '  timeout {}\n'
-                    '  eof { exit 128 }\n'
-                    '}\n'
-                    'send -- "\\r"\n'
-                    'interact'
-                )
-                child_env = os.environ.copy()
-                child_env["WORKBUDDY_CODEBUDDY_CLI"] = cli_path
-                child_env["WORKBUDDY_CODEBUDDY_SETTINGS"] = settings
-                uses_process_group = True
-                process = subprocess.Popen([
-                    expect, "-c", expect_script,
-                ], cwd=BASE_DIR, env=child_env, start_new_session=True)
-            elif sys.platform != "win32":
-                process = subprocess.Popen([
-                    cli_path, "--settings", settings,
-                ], cwd=BASE_DIR, stdin=subprocess.PIPE, text=True)
-                process.stdin.write("/login\n")
-                process.stdin.flush()
-        except (OSError, ValueError, urllib.error.URLError) as e:
-            if process is not None and process.poll() is None:
-                process.terminate()
+            ready = _platform_adapter().login_codebuddy(
+                cli_path=cli_path,
+                base_dir=BASE_DIR,
+                settings=settings,
+                signal_path=signal_path,
+                wait_for_login=_wait_for_codebuddy_login,
+                run_command=_run,
+            )
+        except (OSError, RuntimeError, ValueError, urllib.error.URLError) as e:
             print(f"❌ 无法启动 CodeBuddy CLI：{e}")
             return False
-
-        try:
-            ready = _wait_for_codebuddy_login(process, signal_path)
-        finally:
-            if uses_process_group:
-                try:
-                    os.killpg(process.pid, signal.SIGTERM)
-                except ProcessLookupError:
-                    pass
-                except OSError:
-                    if process.poll() is None:
-                        process.terminate()
-            elif sys.platform == "win32" and process.poll() is None:
-                _run([
-                    "taskkill", "/PID", str(process.pid), "/T", "/F",
-                ])
-                if process.poll() is None:
-                    process.terminate()
-            elif process.poll() is None:
-                process.terminate()
-            try:
-                process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                if uses_process_group:
-                    try:
-                        os.killpg(process.pid, signal.SIGKILL)
-                    except ProcessLookupError:
-                        pass
-                else:
-                    process.kill()
     if not ready:
         print("❌ 等待登录超时。请确认浏览器授权成功后重试。")
         return False
@@ -549,10 +326,12 @@ def _run_codebuddy_preflight():
 def _run_environment_preflight():
     """配置/安装前检查环境，可选择 WorkBuddy 或独立 CLI 登录。"""
     print("=== 环境预检 ===")
-    if sys.platform not in ("darwin", "win32"):
+    try:
+        platform = _platform_adapter()
+    except UnsupportedPlatformError:
         print("❌ 当前仅支持 macOS 和 Windows。")
         return False
-    print(f"✅ 系统：{'Windows' if sys.platform == 'win32' else 'macOS'}")
+    print(f"✅ 系统：{platform.display_name}")
 
     if sys.version_info < (3, 8):
         print("❌ Python 版本过低，请安装 Python 3.8 或更高版本。")
@@ -1210,10 +989,7 @@ def _wx_api_templates(appid, secret):
 
 def _bootstrap_wx_bind_runtime():
     """把 Playwright 装入项目专用 venv，返回重启命令；不污染当前 Python。"""
-    if sys.platform == "win32":
-        venv_python = os.path.join(WX_BIND_VENV, "Scripts", "python.exe")
-    else:
-        venv_python = os.path.join(WX_BIND_VENV, "bin", "python3")
+    venv_python = _platform_adapter().wx_bind_python(WX_BIND_VENV)
     try:
         if not os.path.exists(venv_python):
             print("🔧 首次运行：正在创建微信绑定专用环境…")
@@ -1851,13 +1627,8 @@ def _browser_open(url, label="沙箱页"):
 def _open_local_path(path):
     """跨平台打开本地截图等文件。"""
     try:
-        if sys.platform == "win32":
-            os.startfile(path)
-        elif sys.platform == "darwin":
-            subprocess.run(["open", path], check=False)
-        else:
-            webbrowser.open("file://" + os.path.abspath(path))
-    except Exception:
+        _platform_adapter().open_local_path(path)
+    except (OSError, UnsupportedPlatformError):
         print(f"  📄 请手动打开：{path}")
 
 
@@ -2195,12 +1966,13 @@ def cmd_install(args):
     if not _run_environment_preflight():
         print("❌ 环境预检未通过，未注册定时任务。")
         return 1
-    if sys.platform == "darwin" and not os.path.exists(PLIST_DST):
+    platform = _platform_adapter()
+    if not platform.schedule_definition_ready():
         # 没有 plist 时尝试从 config 生成
         cfg = read_config()
         h = cfg.get("_schedule_hour", 9)
         m = cfg.get("_schedule_minute", 10)
-        write_plist(h, m)
+        platform.prepare_schedule(h, m, write_plist)
         print(f"ℹ️  未找到 plist，已按配置生成（{h:02d}:{m:02d}）。")
     ok, msg = install()
     print(("✅ " if ok else "⚠️ ") + msg)
@@ -2264,6 +2036,7 @@ def _purge_targets():
         os.path.join(BASE_DIR, "wx_qr_screenshot.png"),
         os.path.join(BASE_DIR, "__pycache__"),
         os.path.join(BASE_DIR, "tests", "__pycache__"),
+        os.path.join(BASE_DIR, "workbuddy_platform", "__pycache__"),
         os.path.join(BASE_DIR, ".pytest_cache"),
         os.path.join(BASE_DIR, ".mypy_cache"),
         os.path.join(BASE_DIR, ".ruff_cache"),
@@ -2278,11 +2051,7 @@ def _purge_paths(paths):
     """删除给定运行期路径，返回 (已删除路径, 失败说明)。"""
     def remove_readonly(function, path, exc_info):
         error = exc_info[1]
-        if (sys.platform == "win32"
-                and (isinstance(error, PermissionError)
-                     or getattr(error, "winerror", None) == 5)):
-            os.chmod(path, stat.S_IWRITE)
-            function(path)
+        if _platform_adapter().retry_readonly_removal(function, path, error):
             return
         raise error
 
@@ -2324,37 +2093,9 @@ def _codebuddy_purge_targets():
                 and "codebuddy" in os.path.basename(candidate).lower()):
             targets.append(candidate)
 
-    if sys.platform == "win32":
-        local_app_data = os.environ.get("LOCALAPPDATA") or os.path.join(
-            home, "AppData", "Local"
-        )
-        app_data = os.environ.get("APPDATA") or os.path.join(
-            home, "AppData", "Roaming"
-        )
-        targets.extend([
-            os.path.join(local_app_data, "codebuddy"),
-            os.path.join(app_data, "CodeBuddy Code"),
-        ])
-        targets.extend(
-            os.path.join(
-                local_app_data, "CodeBuddyExtension", "Data", "Public",
-                "auth", filename,
-            )
-            for filename in CODEBUDDY_AUTH_FILENAMES
-        )
-    else:
-        targets.extend([
-            os.path.join(home, ".local", "bin", name)
-            for name in ("codebuddy", "cbc", "codebuddy-code", "cbc-prewarm")
-        ])
-        if sys.platform == "darwin":
-            targets.extend(
-                os.path.join(
-                    home, "Library", "Application Support", "CodeBuddyExtension",
-                    "Data", "Public", "auth", filename,
-                )
-                for filename in CODEBUDDY_AUTH_FILENAMES
-            )
+    targets.extend(
+        _platform_adapter().codebuddy_purge_paths(CODEBUDDY_AUTH_FILENAMES)
+    )
     return list(dict.fromkeys(targets))
 
 
@@ -2419,11 +2160,8 @@ def cmd_status(args):
     print(f"  最大重试      : {max_retries}")
     print(f"  退避基数      : {retry_delay}")
     print(f"  worker 脚本   : {WORKER}")
-    if sys.platform == "darwin":
-        plist_status = PLIST_DST if os.path.isfile(PLIST_DST) else f"{PLIST_DST}（文件不存在）"
-        print(f"  plist 位置    : {plist_status}")
-    elif sys.platform == "win32":
-        print(f"  计划任务      : {WINDOWS_DAILY_TASK} / {WINDOWS_LOGON_TASK}")
+    for label, value in _platform_adapter().status_rows():
+        print(f"  {label:<12}: {value}")
     installed, _ = schedule_installed()
     print(f"  定时注册状态  : {'已注册 ✓' if installed else '未注册（执行 install）'}")
     return 0

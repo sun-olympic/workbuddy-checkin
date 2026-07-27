@@ -942,6 +942,13 @@ class PurgeUninstallTest(unittest.TestCase):
             targets,
         )
         self.assertIn(
+            str(
+                pathlib.Path(checkin_cli.BASE_DIR)
+                / "workbuddy_platform" / "__pycache__"
+            ),
+            targets,
+        )
+        self.assertIn(
             str(pathlib.Path(checkin_cli.BASE_DIR) / ".pytest_cache"),
             targets,
         )
@@ -955,7 +962,7 @@ class PurgeUninstallTest(unittest.TestCase):
             with mock.patch.object(checkin_cli, "CONFIG_PATH", str(missing_config)), \
                     mock.patch.object(checkin_cli, "read_config", return_value={}), \
                     mock.patch.object(
-                        checkin_cli, "launchctl_installed", return_value=(False, "")
+                        checkin_cli, "schedule_installed", return_value=(False, "")
                     ), \
                     redirect_stdout(output):
                 result = checkin_cli.cmd_status(None)
@@ -1092,7 +1099,10 @@ class WxBindingVerificationTest(unittest.TestCase):
                 "auth": {"accessToken": token},
             }))
             with mock.patch.object(worker, "LOGS_DIR", str(pathlib.Path(directory) / "missing")), \
-                    mock.patch.object(worker, "CODEBUDDY_AUTH_PATHS", (str(auth_path),), create=True):
+                    mock.patch.object(
+                        worker, "_codebuddy_auth_paths",
+                        return_value=(str(auth_path),),
+                    ):
                 result = worker.extract_token()
 
         self.assertEqual(result, (token, "codebuddy-user"))
@@ -1117,7 +1127,10 @@ class WxBindingVerificationTest(unittest.TestCase):
                 "auth": {"accessToken": self._jwt(int(time.time()) - 60)},
             }))
             with mock.patch.object(worker, "LOGS_DIR", str(pathlib.Path(directory) / "missing")), \
-                    mock.patch.object(worker, "CODEBUDDY_AUTH_PATHS", (str(auth_path),), create=True):
+                    mock.patch.object(
+                        worker, "_codebuddy_auth_paths",
+                        return_value=(str(auth_path),),
+                    ):
                 result = worker.extract_token()
 
         self.assertIsNone(result)
@@ -1280,7 +1293,7 @@ class WxBindingVerificationTest(unittest.TestCase):
         }
         output = StringIO()
         with mock.patch.object(checkin_cli, "read_config", return_value=cfg), \
-                mock.patch.object(checkin_cli, "launchctl_installed", return_value=(False, "")), \
+                mock.patch.object(checkin_cli, "schedule_installed", return_value=(False, "")), \
                 redirect_stdout(output):
             checkin_cli.cmd_status(None)
 

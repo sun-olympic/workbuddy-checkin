@@ -48,18 +48,13 @@ import urllib.error
 import urllib.parse
 import ssl
 
+from workbuddy_platform import UnsupportedPlatformError, get_platform
+
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 LOGS_DIR = os.path.expanduser("~/.workbuddy/logs")
 CODEBUDDY_AUTH_FILENAMES = (
     "Tencent-Cloud.coding-copilot.info",
     "workbuddy-desktop.info",
-)
-CODEBUDDY_AUTH_PATHS = tuple(
-    os.path.expanduser(
-        "~/Library/Application Support/CodeBuddyExtension/Data/Public/auth/"
-        + filename
-    )
-    for filename in CODEBUDDY_AUTH_FILENAMES
 )
 LOG_PATH = os.path.join(BASE_DIR, "checkin.log")
 CONFIG_PATH = os.path.join(BASE_DIR, "checkin_config.json")
@@ -80,6 +75,10 @@ logging.basicConfig(
     ],
 )
 logger = logging.getLogger("workbuddy-checkin")
+
+
+def _platform_adapter():
+    return get_platform(sys.platform)
 
 
 # ------------------------- 配置 -------------------------
@@ -116,19 +115,11 @@ def _b64decode(seg: str) -> dict:
 
 def _codebuddy_auth_paths():
     """返回当前平台可能存在的 CodeBuddy 官方登录状态路径。"""
-    paths = list(CODEBUDDY_AUTH_PATHS)
-    if sys.platform == "win32":
-        local_app_data = os.environ.get("LOCALAPPDATA") or os.path.expanduser(
-            "~/AppData/Local"
-        )
-        paths.extend(
-            os.path.join(
-                local_app_data,
-                "CodeBuddyExtension", "Data", "Public", "auth", filename,
-            )
-            for filename in CODEBUDDY_AUTH_FILENAMES
-        )
-    return tuple(dict.fromkeys(paths))
+    try:
+        platform = _platform_adapter()
+    except UnsupportedPlatformError:
+        return ()
+    return platform.codebuddy_auth_paths(CODEBUDDY_AUTH_FILENAMES)
 
 
 def extract_token():
@@ -206,47 +197,15 @@ def notify(title, message, cfg):
         return not exclusive or selected == channel
 
     # 1) 桌面通知是独立开关，不参与远程渠道单选。
-    if cfg.get("desktop_notify", True) and sys.platform == "darwin":
+    if cfg.get("desktop_notify", True):
         try:
-            esc_msg = message.replace("\\", "\\\\").replace('"', '\\"')
-            esc_title = title.replace("\\", "\\\\").replace('"', '\\"')
-            script = f'display notification "{esc_msg}" with title "{esc_title}" sound name "Glass"'
-            subprocess.run(
-                ["osascript", "-e", script],
-                check=False, capture_output=True, timeout=10,
+            _platform_adapter().send_desktop_notification(
+                title, message, subprocess.run,
             )
+        except UnsupportedPlatformError:
+            pass
         except Exception as e:
             logger.warning("桌面通知失败: %s", e)
-    elif cfg.get("desktop_notify", True) and sys.platform == "win32":
-        try:
-            def xml_escape(value):
-                return (str(value).replace("&", "&amp;").replace("<", "&lt;")
-                        .replace(">", "&gt;").replace('"', "&quot;")
-                        .replace("'", "&apos;"))
-
-            toast_xml = (
-                '<toast><visual><binding template="ToastGeneric">'
-                f"<text>{xml_escape(title)}</text>"
-                f"<text>{xml_escape(message)}</text>"
-                "</binding></visual></toast>"
-            )
-            script = (
-                "[void][Windows.UI.Notifications.ToastNotificationManager,"
-                "Windows.UI.Notifications,ContentType=WindowsRuntime];"
-                "$xml = New-Object Windows.Data.Xml.Dom.XmlDocument;"
-                f"$xml.LoadXml('{toast_xml}');"
-                "$toast = [Windows.UI.Notifications.ToastNotification]::new($xml);"
-                "[Windows.UI.Notifications.ToastNotificationManager]"
-                "::CreateToastNotifier('WorkBuddy Check-in').Show($toast);"
-            )
-            encoded = base64.b64encode(script.encode("utf-16le")).decode("ascii")
-            subprocess.run(
-                ["powershell", "-NoProfile", "-NonInteractive",
-                 "-EncodedCommand", encoded],
-                check=False, capture_output=True, timeout=10,
-            )
-        except Exception as e:
-            logger.warning("Windows 系统通知失败: %s", e)
 
     # 2) 微信推送（pushplus）
     token = (cfg.get("pushplus_token") or "").strip()

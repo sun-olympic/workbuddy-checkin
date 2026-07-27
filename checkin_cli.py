@@ -360,7 +360,8 @@ def _wait_for_codebuddy_login(process, signal_path, timeout_seconds=180,
     while time.monotonic() < deadline:
         if _workbuddy_token_ready():
             return True
-        if process.poll() is not None:
+        exit_code = process.poll()
+        if exit_code not in (None, 0):
             return _workbuddy_token_ready()
         time.sleep(poll_seconds)
     return _workbuddy_token_ready()
@@ -383,28 +384,22 @@ def _launch_codebuddy_login_and_wait(cli_path):
                     '--settings $env(WORKBUDDY_CODEBUDDY_SETTINGS)\n'
                     'set timeout 45\n'
                     'expect {\n'
-                    '  -re {Tips for getting started|Recent activity} {}\n'
+                    '  -re {Select login method} {}\n'
                     '  timeout { exit 124 }\n'
                     '  eof { exit 125 }\n'
                     '}\n'
-                    'after 300\n'
-                    'set send_slow {1 0.08}\n'
-                    'send -s -- "/login"\n'
                     'set timeout 20\n'
                     'expect {\n'
-                    '  -re {Switch Tencent Cloud CodeBuddy accounts} {}\n'
+                    '  -re {Enter to login} {}\n'
                     '  timeout { exit 126 }\n'
                     '  eof { exit 127 }\n'
                     '}\n'
-                    'after 200\n'
-                    'send -- "\\r"\n'
-                    'set timeout 20\n'
+                    'set timeout 2\n'
                     'expect {\n'
-                    '  -re {Select login method} {}\n'
-                    '  timeout { exit 128 }\n'
-                    '  eof { exit 129 }\n'
+                    '  -re {Enter to login} { exp_continue }\n'
+                    '  timeout {}\n'
+                    '  eof { exit 128 }\n'
                     '}\n'
-                    'after 300\n'
                     'send -- "\\r"\n'
                     'interact'
                 )

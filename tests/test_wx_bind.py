@@ -264,7 +264,24 @@ class EnvironmentPreflightTest(unittest.TestCase):
 
         self.assertFalse(result)
 
-    def test_macos_codebuddy_login_types_slash_command_in_cli_terminal(self):
+    def test_codebuddy_login_waits_for_browser_auth_after_clean_cli_exit(self):
+        process = mock.Mock()
+        process.poll.return_value = 0
+        with tempfile.TemporaryDirectory() as directory, \
+                mock.patch.object(
+                    checkin_cli, "_workbuddy_token_ready",
+                    side_effect=[False, False, True],
+                ), \
+                mock.patch.object(checkin_cli.time, "sleep") as sleep:
+            result = checkin_cli._wait_for_codebuddy_login(
+                process, str(pathlib.Path(directory) / "auth-success"),
+                timeout_seconds=1, poll_seconds=0,
+            )
+
+        self.assertTrue(result)
+        sleep.assert_called()
+
+    def test_macos_codebuddy_login_uses_automatic_menu(self):
         process = mock.Mock()
         process.pid = 4242
         process.poll.return_value = None
@@ -288,31 +305,21 @@ class EnvironmentPreflightTest(unittest.TestCase):
         command = popen.call_args.args[0]
         self.assertEqual(command[0], "/usr/bin/expect")
         expect_script = command[2]
-        self.assertIn('send -s -- "/login"', expect_script)
         self.assertIn('send -- "\\r"', expect_script)
-        self.assertIn(
+        self.assertIn("Select login method", expect_script)
+        self.assertIn("Enter to login", expect_script)
+        self.assertIn("exp_continue", expect_script)
+        self.assertEqual(expect_script.count('send -- "\\r"'), 1)
+        self.assertNotIn('send -s -- "/login"', expect_script)
+        self.assertNotIn(
             "Switch Tencent Cloud CodeBuddy accounts", expect_script,
         )
-        self.assertIn("Select login method", expect_script)
-        self.assertEqual(expect_script.count('send -- "\\r"'), 2)
-        self.assertNotIn('send -- "/login\\r"', expect_script)
+        self.assertNotIn("/usr/bin/pbpaste", expect_script)
+        self.assertNotIn("/usr/bin/open", expect_script)
         self.assertNotIn("spawn -noecho --", expect_script)
-        self.assertIn("Tips for getting started", expect_script)
         self.assertLess(
-            expect_script.index("Tips for getting started"),
-            expect_script.index('send -s -- "/login"'),
-        )
-        self.assertLess(
-            expect_script.index('send -s -- "/login"'),
-            expect_script.index("Switch Tencent Cloud CodeBuddy accounts"),
-        )
-        self.assertLess(
-            expect_script.index("Switch Tencent Cloud CodeBuddy accounts"),
+            expect_script.index("Enter to login"),
             expect_script.index('send -- "\\r"'),
-        )
-        self.assertLess(
-            expect_script.index('send -- "\\r"'),
-            expect_script.index("Select login method"),
         )
         self.assertEqual(len(command), 3)
         self.assertNotIn("--serve", command)

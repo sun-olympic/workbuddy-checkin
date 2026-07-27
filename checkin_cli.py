@@ -368,14 +368,32 @@ def _launch_codebuddy_login_and_wait(cli_path):
     with tempfile.TemporaryDirectory(prefix="workbuddy-login-") as temp_dir:
         signal_path = os.path.join(temp_dir, "auth-success")
         settings = _codebuddy_login_settings(signal_path)
+        process = None
         try:
-            process = subprocess.Popen([
-                cli_path,
-                "--settings", settings,
-                "--serve",
-                "--open",
-            ], cwd=BASE_DIR)
+            expect = shutil.which("expect") if sys.platform == "darwin" else ""
+            if expect:
+                expect_script = (
+                    'spawn -noecho $env(WORKBUDDY_CODEBUDDY_CLI) '
+                    '--settings $env(WORKBUDDY_CODEBUDDY_SETTINGS)\n'
+                    'after 1200\n'
+                    'send -- "/login\\r"\n'
+                    'interact'
+                )
+                child_env = os.environ.copy()
+                child_env["WORKBUDDY_CODEBUDDY_CLI"] = cli_path
+                child_env["WORKBUDDY_CODEBUDDY_SETTINGS"] = settings
+                process = subprocess.Popen([
+                    expect, "-c", expect_script,
+                ], cwd=BASE_DIR, env=child_env)
+            else:
+                process = subprocess.Popen([
+                    cli_path, "--settings", settings,
+                ], cwd=BASE_DIR, stdin=subprocess.PIPE, text=True)
+                process.stdin.write("/login\n")
+                process.stdin.flush()
         except OSError as e:
+            if process is not None and process.poll() is None:
+                process.terminate()
             print(f"❌ 无法启动 CodeBuddy CLI：{e}")
             return False
 

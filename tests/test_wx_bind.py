@@ -263,10 +263,14 @@ class EnvironmentPreflightTest(unittest.TestCase):
 
         self.assertFalse(result)
 
-    def test_codebuddy_login_opens_web_ui_without_treating_slash_as_prompt(self):
+    def test_macos_codebuddy_login_types_slash_command_in_cli_terminal(self):
         process = mock.Mock()
         process.poll.return_value = None
-        with mock.patch.object(
+        with mock.patch.object(checkin_cli.sys, "platform", "darwin"), \
+                mock.patch.object(
+                    checkin_cli.shutil, "which", return_value="/usr/bin/expect",
+                ), \
+                mock.patch.object(
                     checkin_cli.subprocess, "Popen", return_value=process,
                 ) as popen, \
                 mock.patch.object(
@@ -279,14 +283,45 @@ class EnvironmentPreflightTest(unittest.TestCase):
 
         self.assertTrue(result)
         command = popen.call_args.args[0]
-        self.assertEqual(command[0], "/usr/local/bin/codebuddy")
-        self.assertNotIn("/login", command)
-        self.assertIn("--settings", command)
-        self.assertIn("--serve", command)
-        self.assertIn("--open", command)
+        self.assertEqual(command[0], "/usr/bin/expect")
+        self.assertIn('send -- "/login\\r"', command[2])
+        self.assertNotIn("spawn -noecho --", command[2])
+        self.assertEqual(len(command), 3)
+        self.assertNotIn("--serve", command)
+        self.assertNotIn("--open", command)
         popen.assert_called_once()
+        child_env = popen.call_args.kwargs["env"]
+        self.assertEqual(
+            child_env["WORKBUDDY_CODEBUDDY_CLI"],
+            "/usr/local/bin/codebuddy",
+        )
+        self.assertIn("trustAll", child_env["WORKBUDDY_CODEBUDDY_SETTINGS"])
         self.assertNotIn("stdin", popen.call_args.kwargs)
         process.terminate.assert_called_once_with()
+
+    def test_windows_codebuddy_login_sends_slash_command_over_stdin(self):
+        process = mock.Mock()
+        process.poll.return_value = None
+        with mock.patch.object(checkin_cli.sys, "platform", "win32"), \
+                mock.patch.object(
+                    checkin_cli.subprocess, "Popen", return_value=process,
+                ) as popen, \
+                mock.patch.object(
+                    checkin_cli, "_wait_for_codebuddy_login", return_value=True,
+                ), \
+                redirect_stdout(StringIO()):
+            result = checkin_cli._launch_codebuddy_login_and_wait(
+                "C:\\CodeBuddy\\codebuddy.exe"
+            )
+
+        self.assertTrue(result)
+        command = popen.call_args.args[0]
+        self.assertNotIn("/login", command)
+        self.assertNotIn("--serve", command)
+        self.assertIs(popen.call_args.kwargs["stdin"], checkin_cli.subprocess.PIPE)
+        self.assertTrue(popen.call_args.kwargs["text"])
+        process.stdin.write.assert_called_once_with("/login\n")
+        process.stdin.flush.assert_called_once_with()
 
     def test_main_handles_ctrl_c_without_traceback(self):
         output = StringIO()

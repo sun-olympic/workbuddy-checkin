@@ -235,6 +235,27 @@ class WxBindHelpersTest(unittest.TestCase):
 
 
 class EnvironmentPreflightTest(unittest.TestCase):
+    def test_codebuddy_login_uses_interactive_login_command_to_open_browser(self):
+        process = mock.Mock()
+        process.poll.return_value = None
+        with mock.patch.object(
+                    checkin_cli.subprocess, "Popen", return_value=process,
+                ) as popen, \
+                mock.patch.object(
+                    checkin_cli, "_wait_for_workbuddy_token", return_value=True,
+                ), \
+                redirect_stdout(StringIO()):
+            result = checkin_cli._launch_codebuddy_login_and_wait(
+                "/usr/local/bin/codebuddy"
+            )
+
+        self.assertTrue(result)
+        popen.assert_called_once_with(
+            ["/usr/local/bin/codebuddy", "/login"],
+            cwd=checkin_cli.BASE_DIR,
+        )
+        process.terminate.assert_called_once_with()
+
     def test_windows_ready_environment_passes_without_workbuddy(self):
         with mock.patch.object(checkin_cli.sys, "platform", "win32"), \
                 mock.patch.object(checkin_cli, "_workbuddy_token_ready", return_value=True), \

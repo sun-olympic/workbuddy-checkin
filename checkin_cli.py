@@ -331,14 +331,12 @@ def _wait_for_workbuddy_token(timeout_seconds=180, poll_seconds=2):
 
 def _launch_codebuddy_login_and_wait(cli_path):
     """启动独立 CLI 的浏览器登录，并等待其官方登录状态落盘。"""
-    print("🔐 正在启动无 WorkBuddy 登录，浏览器打开后请完成一次扫码/授权。")
+    print("🔐 正在启动无 WorkBuddy 登录，并自动唤起浏览器。")
     print("   除浏览器中的登录确认外，无需复制 Token；最多等待 180 秒。")
     try:
         process = subprocess.Popen([
             cli_path,
-            "--print",
-            "--max-turns", "1",
-            "请仅回复 OK",
+            "/login",
         ], cwd=BASE_DIR)
     except OSError as e:
         print(f"❌ 无法启动 CodeBuddy CLI：{e}")

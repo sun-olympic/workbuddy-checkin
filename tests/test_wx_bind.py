@@ -287,6 +287,9 @@ class EnvironmentPreflightTest(unittest.TestCase):
         expect_script = command[2]
         self.assertIn('send -s -- "/login"', expect_script)
         self.assertIn('send -- "\\r"', expect_script)
+        self.assertIn(
+            "Switch Tencent Cloud CodeBuddy accounts", expect_script,
+        )
         self.assertIn("Select login method", expect_script)
         self.assertEqual(expect_script.count('send -- "\\r"'), 2)
         self.assertNotIn('send -- "/login\\r"', expect_script)
@@ -298,6 +301,14 @@ class EnvironmentPreflightTest(unittest.TestCase):
         )
         self.assertLess(
             expect_script.index('send -s -- "/login"'),
+            expect_script.index("Switch Tencent Cloud CodeBuddy accounts"),
+        )
+        self.assertLess(
+            expect_script.index("Switch Tencent Cloud CodeBuddy accounts"),
+            expect_script.index('send -- "\\r"'),
+        )
+        self.assertLess(
+            expect_script.index('send -- "\\r"'),
             expect_script.index("Select login method"),
         )
         self.assertEqual(len(command), 3)

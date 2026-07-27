@@ -1209,18 +1209,26 @@ def _wx_api_templates(appid, secret):
 
 def _bootstrap_wx_bind_runtime():
     """把 Playwright 装入项目专用 venv，返回重启命令；不污染当前 Python。"""
-    venv_python = os.path.join(WX_BIND_VENV, "bin", "python3")
-    if not os.path.exists(venv_python):
-        print("🔧 首次运行：正在创建微信绑定专用环境…")
-        proc = subprocess.run([sys.executable, "-m", "venv", WX_BIND_VENV])
+    if sys.platform == "win32":
+        venv_python = os.path.join(WX_BIND_VENV, "Scripts", "python.exe")
+    else:
+        venv_python = os.path.join(WX_BIND_VENV, "bin", "python3")
+    try:
+        if not os.path.exists(venv_python):
+            print("🔧 首次运行：正在创建微信绑定专用环境…")
+            proc = subprocess.run([sys.executable, "-m", "venv", WX_BIND_VENV])
+            if proc.returncode != 0:
+                return []
+
+        print("📦 正在安装浏览器自动化组件 Playwright（只需一次）…")
+        proc = subprocess.run([
+            venv_python, "-m", "pip", "install", "--disable-pip-version-check",
+            "playwright",
+        ])
         if proc.returncode != 0:
             return []
-
-    print("📦 正在安装浏览器自动化组件 Playwright（只需一次）…")
-    proc = subprocess.run([
-        venv_python, "-m", "pip", "install", "--disable-pip-version-check", "playwright",
-    ])
-    if proc.returncode != 0:
+    except OSError as e:
+        print(f"❌ 无法启动微信绑定专用环境：{e}")
         return []
     return [
         venv_python,

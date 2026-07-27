@@ -1,6 +1,7 @@
 import importlib.util
 import base64
 import json
+import os
 import pathlib
 import signal
 import socket
@@ -263,6 +264,33 @@ class WxBindHelpersTest(unittest.TestCase):
 
         self.assertEqual(command[-2:], ["--mode", "auto"])
         self.assertIn("--no-fallback", command)
+
+    def test_windows_bootstrap_uses_scripts_python_executable(self):
+        completed = mock.Mock(returncode=0)
+        with mock.patch.object(checkin_cli.sys, "platform", "win32"), \
+                mock.patch.object(checkin_cli.os.path, "exists", return_value=True), \
+                mock.patch.object(
+                    checkin_cli.subprocess, "run", return_value=completed,
+                ) as run, redirect_stdout(StringIO()):
+            command = checkin_cli._bootstrap_wx_bind_runtime()
+
+        expected = os.path.join(
+            checkin_cli.WX_BIND_VENV, "Scripts", "python.exe",
+        )
+        self.assertEqual(run.call_args.args[0][0], expected)
+        self.assertEqual(command[0], expected)
+
+    def test_bootstrap_reports_missing_venv_python_without_traceback(self):
+        output = StringIO()
+        with mock.patch.object(checkin_cli.os.path, "exists", return_value=True), \
+                mock.patch.object(
+                    checkin_cli.subprocess, "run",
+                    side_effect=FileNotFoundError("python not found"),
+                ), redirect_stdout(output):
+            command = checkin_cli._bootstrap_wx_bind_runtime()
+
+        self.assertEqual(command, [])
+        self.assertIn("无法启动微信绑定专用环境", output.getvalue())
 
     def test_nested_auto_process_can_disable_its_own_fallback_prompt(self):
         flow = checkin_cli._run_wx_bind_flow

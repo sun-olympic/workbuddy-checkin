@@ -13,9 +13,9 @@
 
 自动绑定微信时建议已安装 Chrome；Playwright 会自动安装到项目专用环境。
 
-## 未安装 Python
+## 未安装 Python 或 npm
 
-先检查 Python 版本。本项目要求 Python 3.8 或更高版本。
+本项目要求 Python 3.8 或更高版本。无 WorkBuddy 模式还需要 Node.js 18.20.8+ 和 npm；npm 会随 Node.js 一起安装，无需单独安装。
 
 ### macOS
 
@@ -31,6 +31,23 @@ python3 --version
 ```
 
 没有 Homebrew 时，可直接使用 [Python macOS 官方安装器](https://www.python.org/downloads/macos/)。安装完成后重新打开终端，再执行 `python3 --version`。不要删除或修改 macOS 自带的 `/usr/bin/python3`。
+
+无 WorkBuddy 模式还需检查 Node.js 和 npm：
+
+```bash
+node --version
+npm --version
+```
+
+若任一命令不存在，使用 Homebrew 安装 Node.js（会同时安装 npm）：
+
+```bash
+brew install node
+node --version
+npm --version
+```
+
+没有 Homebrew 时，可使用 [Node.js 官方安装器](https://nodejs.org/en/download)，建议选择 LTS 版本。
 
 ### Windows
 
@@ -49,6 +66,21 @@ python --version
 ```
 
 如果没有 `winget`，请使用 [Python Windows 官方安装说明](https://docs.python.org/3/using/windows.html) 中的安装包。安装完成后若命令仍不可用，关闭并重新打开 PowerShell。后续命令在 Windows 使用 `python`，在 macOS 使用 `python3`。
+
+无 WorkBuddy 模式还需检查 Node.js 和 npm：
+
+```powershell
+node --version
+npm --version
+```
+
+若任一命令不存在，使用 WinGet 安装 Node.js LTS（会同时安装 npm）：
+
+```powershell
+winget install --id OpenJS.NodeJS.LTS -e --accept-package-agreements --accept-source-agreements
+```
+
+安装完成后重新打开 PowerShell，再执行 `node --version` 和 `npm --version`。如果没有 `winget`，请使用 [Node.js 官方安装器](https://nodejs.org/en/download)，并选择 LTS 版本。
 
 ## 快速开始
 

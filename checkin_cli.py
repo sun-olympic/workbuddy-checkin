@@ -401,7 +401,8 @@ def _launch_codebuddy_login_and_wait(cli_path):
                     "--host", "127.0.0.1",
                     "--port", str(port),
                     "--settings", settings,
-                ], cwd=BASE_DIR)
+                ], cwd=BASE_DIR, stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
                 status = None
                 deadline = time.monotonic() + 15

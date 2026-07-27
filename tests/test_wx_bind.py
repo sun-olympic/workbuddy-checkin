@@ -501,7 +501,15 @@ class EnvironmentPreflightTest(unittest.TestCase):
         self.assertIn("127.0.0.1", command)
         self.assertIn("--port", command)
         self.assertIn("54321", command)
-        self.assertNotIn("stdin", popen.call_args.kwargs)
+        self.assertIs(
+            popen.call_args.kwargs.get("stdin"), checkin_cli.subprocess.DEVNULL,
+        )
+        self.assertIs(
+            popen.call_args.kwargs.get("stdout"), checkin_cli.subprocess.DEVNULL,
+        )
+        self.assertIs(
+            popen.call_args.kwargs.get("stderr"), checkin_cli.subprocess.DEVNULL,
+        )
         status_request = urlopen.call_args_list[0].args[0]
         login_request = urlopen.call_args_list[1].args[0]
         self.assertEqual(status_request.get_method(), "GET")

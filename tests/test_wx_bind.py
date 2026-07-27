@@ -235,17 +235,33 @@ class WxBindHelpersTest(unittest.TestCase):
 
 
 class EnvironmentPreflightTest(unittest.TestCase):
-    def test_codebuddy_auth_success_hook_signals_wizard_to_resume(self):
+    def test_codebuddy_login_settings_skip_folder_trust_and_register_hook(self):
         settings = json.loads(checkin_cli._codebuddy_login_settings(
             "/tmp/workbuddy login.done"
         ))
 
+        self.assertTrue(settings["trustAll"])
         notification = settings["hooks"]["Notification"][0]
         self.assertEqual(notification["matcher"], "auth_success")
         self.assertIn(
             "/tmp/workbuddy login.done",
             notification["hooks"][0]["command"],
         )
+
+    def test_codebuddy_auth_signal_without_bearer_token_is_not_success(self):
+        process = mock.Mock()
+        process.poll.return_value = 0
+        with tempfile.TemporaryDirectory() as directory:
+            signal_path = pathlib.Path(directory) / "auth-success"
+            signal_path.touch()
+            with mock.patch.object(
+                        checkin_cli, "_workbuddy_token_ready", return_value=False,
+                    ):
+                result = checkin_cli._wait_for_codebuddy_login(
+                    process, str(signal_path), timeout_seconds=0,
+                )
+
+        self.assertFalse(result)
 
     def test_codebuddy_login_uses_interactive_login_command_to_open_browser(self):
         process = mock.Mock()

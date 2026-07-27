@@ -332,9 +332,10 @@ def _wait_for_workbuddy_token(timeout_seconds=180, poll_seconds=2):
 
 
 def _codebuddy_login_settings(signal_path):
-    """用一次性 auth_success hook 通知父向导登录已经完成。"""
+    """跳过首次目录确认；hook 只记录认证事件，不作为登录成功依据。"""
     hook_path = signal_path.replace("\\", "/")
     return json.dumps({
+        "trustAll": True,
         "hooks": {
             "Notification": [{
                 "matcher": "auth_success",
@@ -349,15 +350,15 @@ def _codebuddy_login_settings(signal_path):
 
 def _wait_for_codebuddy_login(process, signal_path, timeout_seconds=180,
                               poll_seconds=0.5):
-    """等待 token 或 CodeBuddy 的 auth_success 通知，避免登录界面常驻。"""
+    """只以可读取的有效 token 判断成功；auth_success 不能替代凭证校验。"""
     deadline = time.monotonic() + timeout_seconds
     while time.monotonic() < deadline:
-        if _workbuddy_token_ready() or os.path.exists(signal_path):
+        if _workbuddy_token_ready():
             return True
         if process.poll() is not None:
-            return _workbuddy_token_ready() or os.path.exists(signal_path)
+            return _workbuddy_token_ready()
         time.sleep(poll_seconds)
-    return _workbuddy_token_ready() or os.path.exists(signal_path)
+    return _workbuddy_token_ready()
 
 
 def _launch_codebuddy_login_and_wait(cli_path):

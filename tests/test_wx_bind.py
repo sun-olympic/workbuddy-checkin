@@ -263,7 +263,7 @@ class EnvironmentPreflightTest(unittest.TestCase):
 
         self.assertFalse(result)
 
-    def test_codebuddy_login_uses_interactive_login_command_to_open_browser(self):
+    def test_codebuddy_login_opens_web_ui_without_treating_slash_as_prompt(self):
         process = mock.Mock()
         process.poll.return_value = None
         with mock.patch.object(
@@ -280,9 +280,12 @@ class EnvironmentPreflightTest(unittest.TestCase):
         self.assertTrue(result)
         command = popen.call_args.args[0]
         self.assertEqual(command[0], "/usr/local/bin/codebuddy")
-        self.assertEqual(command[-1], "/login")
+        self.assertNotIn("/login", command)
         self.assertIn("--settings", command)
+        self.assertIn("--serve", command)
+        self.assertIn("--open", command)
         popen.assert_called_once()
+        self.assertNotIn("stdin", popen.call_args.kwargs)
         process.terminate.assert_called_once_with()
 
     def test_main_handles_ctrl_c_without_traceback(self):

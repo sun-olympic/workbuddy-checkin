@@ -372,7 +372,8 @@ def _launch_codebuddy_login_and_wait(cli_path):
             process = subprocess.Popen([
                 cli_path,
                 "--settings", settings,
-                "/login",
+                "--serve",
+                "--open",
             ], cwd=BASE_DIR)
         except OSError as e:
             print(f"❌ 无法启动 CodeBuddy CLI：{e}")

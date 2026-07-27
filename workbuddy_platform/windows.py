@@ -13,6 +13,7 @@ import webbrowser
 
 class WindowsPlatform:
     display_name = "Windows"
+    python_command = "python"
     npm_command = "npm.cmd"
 
     def __init__(self, scheduler_settings=None):

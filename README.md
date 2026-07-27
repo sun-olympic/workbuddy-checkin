@@ -84,6 +84,8 @@ winget install --id OpenJS.NodeJS.LTS -e --accept-package-agreements --accept-so
 
 ## 快速开始
 
+### macOS
+
 ```bash
 cd /path/to/workbuddy-checkin
 
@@ -98,7 +100,7 @@ python3 checkin_cli.py test-notify
 python3 checkin_cli.py status
 ```
 
-Windows PowerShell 中把 `python3` 换成 `python`：
+### Windows
 
 ```powershell
 cd C:\path\to\workbuddy-checkin
@@ -164,18 +166,18 @@ python3 checkin_cli.py wx-bind --mode manual
 
 ## 常用命令
 
-| 操作 | 命令 |
-| --- | --- |
-| 配置向导 | `python3 checkin_cli.py wizard` |
-| 注册定时任务 | `python3 checkin_cli.py install` |
-| 查看状态 | `python3 checkin_cli.py status` |
-| 立即签到 | `python3 checkin_cli.py run` |
-| 只查询状态 | `python3 checkin_cli.py run --dry-run` |
-| 关闭重试运行 | `python3 checkin_cli.py run --no-retry` |
-| 发送测试通知 | `python3 checkin_cli.py test-notify` |
-| 卸载定时任务，保留配置 | `python3 checkin_cli.py uninstall` |
-| 彻底清理运行数据 | `python3 checkin_cli.py uninstall --purge` |
-| 连同 CodeBuddy 和登录态一起删除 | `python3 checkin_cli.py uninstall --purge --codebuddy` |
+| 操作 | macOS | Windows PowerShell |
+| --- | --- | --- |
+| 配置向导 | `python3 checkin_cli.py wizard` | `python checkin_cli.py wizard` |
+| 注册定时任务 | `python3 checkin_cli.py install` | `python checkin_cli.py install` |
+| 查看状态 | `python3 checkin_cli.py status` | `python checkin_cli.py status` |
+| 立即签到 | `python3 checkin_cli.py run` | `python checkin_cli.py run` |
+| 只查询状态 | `python3 checkin_cli.py run --dry-run` | `python checkin_cli.py run --dry-run` |
+| 关闭重试运行 | `python3 checkin_cli.py run --no-retry` | `python checkin_cli.py run --no-retry` |
+| 发送测试通知 | `python3 checkin_cli.py test-notify` | `python checkin_cli.py test-notify` |
+| 卸载定时任务，保留配置 | `python3 checkin_cli.py uninstall` | `python checkin_cli.py uninstall` |
+| 彻底清理运行数据 | `python3 checkin_cli.py uninstall --purge` | `python checkin_cli.py uninstall --purge` |
+| 连同 CodeBuddy 和登录态一起删除 | `python3 checkin_cli.py uninstall --purge --codebuddy` | `python checkin_cli.py uninstall --purge --codebuddy` |
 
 彻底清理会删除任务计划或 plist，以及配置、微信凭证/token 缓存、日志、截图、Python/测试缓存和 Playwright 专用环境；项目源码保留。
 

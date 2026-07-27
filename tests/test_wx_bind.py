@@ -95,6 +95,16 @@ class WxBindHelpersTest(unittest.TestCase):
         self.assertIn("checkin_cli.py install", output)
         self.assertIn("checkin_cli.py test-notify", output)
 
+    def test_windows_next_steps_use_python_command(self):
+        output = StringIO()
+
+        with mock.patch.object(checkin_cli.sys, "platform", "win32"), \
+                redirect_stdout(output):
+            checkin_cli._print_next_steps()
+
+        self.assertIn("python checkin_cli.py install", output.getvalue())
+        self.assertNotIn("python3 checkin_cli.py", output.getvalue())
+
     def test_parser_exposes_one_click_wx_bind_and_keeps_wx_login_alias(self):
         parser = checkin_cli.build_parser()
 

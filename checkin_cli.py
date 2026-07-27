@@ -568,9 +568,11 @@ def interactive_config(cfg):
 
 def _print_next_steps():
     """绑定或配置完成后立即展示可执行的后续命令。"""
+    python_command = _platform_adapter().python_command
+    script_name = os.path.basename(__file__)
     print("\n下一步：")
-    print(f"   python3 {os.path.basename(__file__)} install       # 注册定时任务")
-    print(f"   python3 {os.path.basename(__file__)} test-notify   # 验证推送链路")
+    print(f"   {python_command} {script_name} install       # 注册定时任务")
+    print(f"   {python_command} {script_name} test-notify   # 验证推送链路")
 
 
 def cmd_wizard(args):

@@ -6,6 +6,7 @@ import subprocess
 
 class MacOSPlatform:
     display_name = "macOS"
+    python_command = "python3"
     npm_command = "npm"
 
     def __init__(self, scheduler_settings=None):

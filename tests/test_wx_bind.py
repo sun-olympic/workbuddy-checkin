@@ -4,8 +4,10 @@ import json
 import pathlib
 import signal
 import stat
+import sys
 import tempfile
 import time
+import types
 import unittest
 from contextlib import redirect_stdout
 from io import StringIO
@@ -29,6 +31,68 @@ WORKER_SPEC.loader.exec_module(worker)
 
 
 class WxBindHelpersTest(unittest.TestCase):
+    def _run_successful_auto_bind(self, events):
+        playwright = mock.Mock()
+        manager = mock.MagicMock()
+        manager.__enter__.return_value = playwright
+        sync_api = types.ModuleType("playwright.sync_api")
+        sync_api.sync_playwright = mock.Mock(return_value=manager)
+        package = types.ModuleType("playwright")
+        package.sync_api = sync_api
+
+        browser = mock.Mock()
+        browser.new_context.return_value = mock.Mock()
+        browser.close.side_effect = lambda: events.append("browser_close")
+        page = mock.Mock()
+        args = checkin_cli.argparse.Namespace(no_bootstrap=True)
+        output = StringIO()
+
+        with mock.patch.dict(
+                    sys.modules,
+                    {"playwright": package, "playwright.sync_api": sync_api},
+                ), \
+                mock.patch.object(
+                    checkin_cli, "_launch_wx_browser", return_value=browser,
+                ), \
+                mock.patch.object(
+                    checkin_cli, "_open_login_and_wait_for_scan",
+                    return_value=(page, "wx12345678", "secret-value"),
+                ), \
+                mock.patch.object(
+                    checkin_cli, "_ensure_wx_template", return_value="template-id",
+                ), \
+                mock.patch.object(
+                    checkin_cli, "_ensure_wx_recipient", return_value="openid-value",
+                ), \
+                mock.patch.object(checkin_cli, "read_config", return_value={}), \
+                mock.patch.object(
+                    checkin_cli, "_send_wx_binding_test",
+                    side_effect=lambda cfg: events.append("send") or True,
+                ), \
+                mock.patch.object(
+                    checkin_cli, "write_config",
+                    side_effect=lambda cfg: events.append("save"),
+                ), redirect_stdout(output):
+            result = checkin_cli._cmd_wx_bind_auto(args)
+
+        return result, output.getvalue()
+
+    def test_auto_bind_closes_browser_before_sending_test_message(self):
+        events = []
+
+        result, _ = self._run_successful_auto_bind(events)
+
+        self.assertEqual(result, 0)
+        self.assertLess(events.index("browser_close"), events.index("send"))
+
+    def test_auto_bind_success_prints_next_steps(self):
+        result, output = self._run_successful_auto_bind([])
+
+        self.assertEqual(result, 0)
+        self.assertIn("下一步：", output)
+        self.assertIn("checkin_cli.py install", output)
+        self.assertIn("checkin_cli.py test-notify", output)
+
     def test_parser_exposes_one_click_wx_bind_and_keeps_wx_login_alias(self):
         parser = checkin_cli.build_parser()
 

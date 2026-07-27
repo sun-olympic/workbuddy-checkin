@@ -695,10 +695,16 @@ def interactive_config(cfg):
         if bind_result != 0:
             print("⚠️  基础配置已保存，但微信绑定未完成；可稍后重新运行 wx-bind。")
             return bind_result
+        return 0
+    _print_next_steps()
+    return 0
+
+
+def _print_next_steps():
+    """绑定或配置完成后立即展示可执行的后续命令。"""
     print("\n下一步：")
     print(f"   python3 {os.path.basename(__file__)} install       # 注册定时任务")
     print(f"   python3 {os.path.basename(__file__)} test-notify   # 验证推送链路")
-    return 0
 
 
 def cmd_wizard(args):
@@ -1446,13 +1452,20 @@ def _cmd_wx_bind_auto(args):
                 raise RuntimeError("等待关注二维码扫码超时，未识别到接收者")
 
             cfg = _with_wx_binding(current_cfg, appid, secret, openid, template_id)
-            print("🔔 正在发送绑定测试消息…")
-            if not _send_wx_binding_test(cfg):
-                raise RuntimeError("微信测试消息发送失败；请检查微信接口返回")
-            write_config(cfg)
-            print("💾 微信凭证已自动保存。")
-            print("🎉 微信绑定完成！请在手机微信中确认收到测试消息。")
-            return 0
+            try:
+                browser.close()
+            except Exception:
+                pass
+            browser = None
+
+        print("🔔 正在发送绑定测试消息…")
+        if not _send_wx_binding_test(cfg):
+            raise RuntimeError("微信测试消息发送失败；请检查微信接口返回")
+        write_config(cfg)
+        print("💾 微信凭证已自动保存。")
+        print("🎉 微信绑定完成！请在手机微信中确认收到测试消息。")
+        _print_next_steps()
+        return 0
     except Exception as e:
         if page:
             try:
@@ -1918,9 +1931,7 @@ def _wx_setup_confirm_and_send(cfg, appid, secret, openid, template_id):
     cfg_fresh = mod.load_config()
     mod.notify("🔔 WorkBuddy 签到测试", "恭喜，微信测试号绑定成功！签到结果将推送到这里。", cfg_fresh)
     print("✅ 测试通知已发送，请查看你的微信！")
-    print("\n下一步：")
-    print(f"   python3 {os.path.basename(__file__)} install       # 注册定时任务")
-    print(f"   python3 {os.path.basename(__file__)} test-notify   # 随时复测推送")
+    _print_next_steps()
 
 
 # ---- 微信 API 辅助函数 ----

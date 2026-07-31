@@ -58,6 +58,7 @@ CODEBUDDY_AUTH_FILENAMES = (
 )
 LOG_PATH = os.path.join(BASE_DIR, "checkin.log")
 CONFIG_PATH = os.path.join(BASE_DIR, "checkin_config.json")
+CHECKIN_CLI_PATH = os.path.join(BASE_DIR, "checkin_cli.py")
 
 CHECKIN_STATUS_URL = "https://copilot.tencent.com/billing/meter/checkin-status"
 CHECKIN_CLAIM_URL = "https://copilot.tencent.com/billing/meter/daily-checkin"
@@ -404,7 +405,46 @@ def _wechat_test_send(title, message, cfg):
 
 
 # ------------------------- 主流程 -------------------------
-def do_checkin(dry_run=False, force=False):
+def _launch_reauthentication(cfg):
+    """打开已保存的登录入口，等待用户授权并返回新的有效 token。"""
+    mode = (cfg.get("_auth_mode") or "auto").strip()
+    if mode not in ("auto", "workbuddy", "codebuddy_cli"):
+        mode = "auto"
+    if mode == "workbuddy":
+        detail = "已打开 WorkBuddy 客户端，请完成登录"
+    elif mode == "codebuddy_cli":
+        detail = "已打开 CodeBuddy 浏览器授权页，请完成登录"
+    else:
+        detail = "已打开原登录入口，请完成登录"
+    notify("🔐 WorkBuddy 登录已失效", detail, cfg)
+    logger.warning("Token 失效，正在启动重新登录（mode=%s）", mode)
+    command = [
+        sys.executable, CHECKIN_CLI_PATH,
+        "reauth", "--mode", mode,
+    ]
+    try:
+        completed = subprocess.run(
+            command, cwd=BASE_DIR, check=False, timeout=210,
+        )
+    except subprocess.TimeoutExpired:
+        logger.error("重新登录超过 210 秒，已停止等待")
+        return None
+    except OSError as exc:
+        logger.error("无法启动重新登录流程: %s", exc)
+        return None
+    if completed.returncode != 0:
+        logger.error("重新登录未完成（exit=%s）", completed.returncode)
+        return None
+    token = extract_token()
+    if not token:
+        logger.error("重新登录流程结束，但仍未找到有效 token")
+        return None
+    logger.info("重新登录成功，继续本次自动签到")
+    return token
+
+
+def do_checkin(dry_run=False, force=False, cfg=None, _allow_reauth=True,
+               _token_override=None):
     """
     执行一次签到尝试。
     返回 (ok: bool, transient: bool, outcome: str)：
@@ -412,8 +452,17 @@ def do_checkin(dry_run=False, force=False):
       - ok=False, transient=True  ：临时错误（网络/5xx），可重试
       - ok=False, transient=False ：确定性失败（无 token / token 过期 / 未知错误），不可重试
     """
-    tok_uid = extract_token()
+    cfg = cfg or load_config()
+    tok_uid = _token_override or extract_token()
     if not tok_uid:
+        if not dry_run and _allow_reauth:
+            recovered = _launch_reauthentication(cfg)
+            if recovered:
+                token_override = recovered if isinstance(recovered, tuple) else None
+                return do_checkin(
+                    dry_run=dry_run, force=force, cfg=cfg,
+                    _allow_reauth=False, _token_override=token_override,
+                )
         logger.error("未找到有效 Bearer token（WorkBuddy/CodeBuddy CLI 均无有效登录态）")
         print("❌ 未找到有效登录 token。")
         print("   请运行 checkin_cli.py wizard，选择 WorkBuddy 或无 WorkBuddy 登录模式。")
@@ -427,6 +476,17 @@ def do_checkin(dry_run=False, force=False):
         status, sj = _post(CHECKIN_STATUS_URL, token, uid)
         data = (sj.get("data") or {}) if isinstance(sj, dict) else {}
         logger.info("签到状态: %s", data)
+    except urllib.error.HTTPError as e:
+        if e.code == 401 and not dry_run and _allow_reauth:
+            logger.warning("状态接口拒绝 Token，尝试重新登录")
+            recovered = _launch_reauthentication(cfg)
+            if recovered:
+                token_override = recovered if isinstance(recovered, tuple) else None
+                return do_checkin(
+                    dry_run=dry_run, force=force, cfg=cfg,
+                    _allow_reauth=False, _token_override=token_override,
+                )
+        logger.warning("查询签到状态失败（不影响签到尝试）: %s", e)
     except Exception as e:
         logger.warning("查询签到状态失败（不影响签到尝试）: %s", e)
 
@@ -460,6 +520,15 @@ def do_checkin(dry_run=False, force=False):
             logger.info("接口确认今日已签到: %s", cj)
             print("✅ 今日已签到（接口确认），无需重复。")
             return True, False, "already_checked_in"
+        if e.code == 401 and not dry_run and _allow_reauth:
+            logger.warning("Token 被服务端拒绝，尝试重新登录")
+            recovered = _launch_reauthentication(cfg)
+            if recovered:
+                token_override = recovered if isinstance(recovered, tuple) else None
+                return do_checkin(
+                    dry_run=dry_run, force=force, cfg=cfg,
+                    _allow_reauth=False, _token_override=token_override,
+                )
         # 4xx 中除了「已签」都视为确定性失败（含 401 token 过期）
         logger.error("签到 HTTP %d: %s", e.code, body)
         print(f"❌ 签到请求失败 (HTTP {e.code}): {msg}")
@@ -538,7 +607,9 @@ def main():
     outcome = "failed"
     while True:
         attempt += 1
-        ok, transient, outcome = do_checkin(dry_run=dry, force=force)
+        ok, transient, outcome = do_checkin(
+            dry_run=dry, force=force, cfg=cfg,
+        )
         if ok or not transient or attempt > max_retries:
             break
         delay = base_delay * (2 ** (attempt - 1))

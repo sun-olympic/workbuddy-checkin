@@ -172,6 +172,17 @@ python3 checkin_cli.py wx-bind --mode manual
 - 首次临时失败会立即通知“正在重试”，重试结束后再通知最终结果。
 - 如果用户当天已签到，仍会通知“此前已签到，本次未执行自动签到”。
 
+## Token 失效自动恢复
+
+配置向导会保存用户实际使用的登录方式。自动签到发现 Token 过期、缺失或被服务端以 HTTP 401 拒绝时：
+
+- WorkBuddy 模式：自动打开 WorkBuddy 客户端。
+- 无 WorkBuddy 模式：自动打开 CodeBuddy 浏览器授权页。
+- 登录完成后，会在同一次任务中重新读取 Token 并继续签到。
+- 每次签到最多触发一次登录；180 秒内未完成时停止并发送失败通知。
+
+也可手动触发：macOS 执行 `python3 checkin_cli.py reauth`，Windows 执行 `python checkin_cli.py reauth`。
+
 ## 常用命令
 
 | 操作 | macOS | Windows PowerShell |
@@ -183,6 +194,7 @@ python3 checkin_cli.py wx-bind --mode manual
 | 只查询状态 | `python3 checkin_cli.py run --dry-run` | `python checkin_cli.py run --dry-run` |
 | 关闭重试运行 | `python3 checkin_cli.py run --no-retry` | `python checkin_cli.py run --no-retry` |
 | 发送测试通知 | `python3 checkin_cli.py test-notify` | `python checkin_cli.py test-notify` |
+| 重新打开原登录方式 | `python3 checkin_cli.py reauth` | `python checkin_cli.py reauth` |
 | 卸载定时任务，保留配置 | `python3 checkin_cli.py uninstall` | `python checkin_cli.py uninstall` |
 | 彻底清理运行数据 | `python3 checkin_cli.py uninstall --purge` | `python checkin_cli.py uninstall --purge` |
 | 连同 CodeBuddy 和登录态一起删除 | `python3 checkin_cli.py uninstall --purge --codebuddy` | `python checkin_cli.py uninstall --purge --codebuddy` |

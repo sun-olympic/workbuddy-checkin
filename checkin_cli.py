@@ -72,6 +72,7 @@ CODEBUDDY_AUTH_FILENAMES = (
     "Tencent-Cloud.coding-copilot.info",
     "workbuddy-desktop.info",
 )
+AUTH_MODES = ("auto", "workbuddy", "codebuddy_cli")
 
 # 用运行本 CLI 的 python 执行 worker（worker 仅用标准库，任意 python 皆可）
 PY = sys.executable
@@ -349,12 +350,13 @@ def _run_environment_preflight():
     if _workbuddy_token_ready():
         print("✅ 登录态：已找到有效 token")
         print("✅ 环境预检通过。\n")
-        return True
+        saved_mode = read_config().get("_auth_mode", "auto")
+        return saved_mode if saved_mode in AUTH_MODES else "auto"
 
     app_path = _find_workbuddy_app()
     if not app_path:
         print("ℹ️  未安装 WorkBuddy，自动进入“无 WorkBuddy 模式”。")
-        return _run_codebuddy_preflight()
+        return "codebuddy_cli" if _run_codebuddy_preflight() else False
 
     print(f"✅ WorkBuddy：{app_path}")
 
@@ -367,7 +369,7 @@ def _run_environment_preflight():
     except EOFError:
         answer = "1"
     if answer == "2":
-        return _run_codebuddy_preflight()
+        return "codebuddy_cli" if _run_codebuddy_preflight() else False
     if answer not in ("", "1"):
         print("❌ 无效选择，已取消环境预检。")
         return False
@@ -382,14 +384,25 @@ def _run_environment_preflight():
 
     print("✅ 登录态：已自动获取有效 token")
     print("✅ 环境预检通过。\n")
-    return True
+    return "workbuddy"
 
 
 def interactive_config(cfg):
     """交互式向导：逐步询问，回车用默认值；输入 clear 可清空某项。"""
-    if not _run_environment_preflight():
+    auth_mode = _run_environment_preflight()
+    if not auth_mode:
         print("❌ 环境预检未通过，未写入配置。")
         return 1
+    if auth_mode in AUTH_MODES:
+        cfg["_auth_mode"] = auth_mode
+    if auth_mode == "workbuddy":
+        executable = _find_workbuddy_app()
+        if executable:
+            cfg["_auth_executable"] = executable
+    elif auth_mode == "codebuddy_cli":
+        executable = _find_codebuddy_cli()
+        if executable:
+            cfg["_auth_executable"] = executable
 
     def ask(prompt, default=""):
         try:
@@ -1972,6 +1985,59 @@ def _wx_verify_and_fix_template(cfg, appid, secret, template_id):
         return new_id
 
 
+def cmd_reauth(args):
+    """按已保存的认证方式打开登录入口，并等待新的有效 token。"""
+    cfg = read_config()
+    configured_mode = cfg.get("_auth_mode", "auto")
+    mode = getattr(args, "mode", "auto") or "auto"
+    if mode == "auto":
+        if configured_mode in ("workbuddy", "codebuddy_cli"):
+            mode = configured_mode
+        else:
+            mode = "workbuddy" if _find_workbuddy_app() else "codebuddy_cli"
+
+    if mode == "workbuddy":
+        saved_path = (
+            cfg.get("_auth_executable", "")
+            if configured_mode == mode else ""
+        )
+        app_path = (
+            saved_path if os.path.exists(saved_path)
+            else _find_workbuddy_app()
+        )
+        if not app_path:
+            print("❌ 未找到 WorkBuddy 客户端，无法按原方式重新登录。")
+            return 1
+        if not _launch_workbuddy_app(app_path):
+            print("❌ 无法启动 WorkBuddy，请手动打开后重试。")
+            return 1
+        print("🔐 Token 已失效，已打开 WorkBuddy，请完成登录。")
+        ready = _wait_for_workbuddy_token()
+    else:
+        saved_path = (
+            cfg.get("_auth_executable", "")
+            if configured_mode == mode else ""
+        )
+        cli_path = (
+            saved_path if os.path.isfile(saved_path)
+            else _find_codebuddy_cli()
+        )
+        if not cli_path:
+            print("❌ 未找到 CodeBuddy CLI，请重新运行配置向导。")
+            return 1
+        ready = _launch_codebuddy_login_and_wait(cli_path)
+
+    if not ready:
+        print("❌ 等待重新登录超时，本次签到已停止。")
+        return 1
+    if cfg:
+        cfg["_auth_mode"] = mode
+        cfg["_auth_executable"] = app_path if mode == "workbuddy" else cli_path
+        write_config(cfg)
+    print("✅ 登录已恢复，将继续自动签到。")
+    return 0
+
+
 def cmd_install(args):
     if not _run_environment_preflight():
         print("❌ 环境预检未通过，未注册定时任务。")
@@ -2270,6 +2336,13 @@ def build_parser():
 
     pi = sub.add_parser("install", help="注册每日定时任务和登录补跑任务")
     pi.set_defaults(func=cmd_install)
+
+    pa = sub.add_parser("reauth", help="Token 失效后重新打开原登录方式")
+    pa.add_argument(
+        "--mode", choices=AUTH_MODES, default="auto",
+        help="登录方式；auto 优先使用已保存的方式",
+    )
+    pa.set_defaults(func=cmd_reauth)
 
     pu = sub.add_parser("uninstall", help="卸载定时任务")
     pu.add_argument(

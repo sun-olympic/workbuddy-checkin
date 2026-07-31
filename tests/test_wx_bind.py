@@ -1,5 +1,6 @@
 import importlib.util
 import base64
+import io
 import json
 import os
 import pathlib
@@ -11,6 +12,7 @@ import tempfile
 import time
 import types
 import unittest
+import urllib.error
 from contextlib import redirect_stdout
 from io import StringIO
 from unittest import mock
@@ -323,10 +325,14 @@ class WxBindHelpersTest(unittest.TestCase):
         with mock.patch("builtins.input", side_effect=answers), \
                 mock.patch.object(
                     checkin_cli, "_run_environment_preflight",
-                    return_value=True, create=True,
+                    return_value="codebuddy_cli", create=True,
                 ), \
                 mock.patch.object(checkin_cli, "write_config") as write_config, \
                 mock.patch.object(checkin_cli, "write_plist", return_value="test.plist"), \
+                mock.patch.object(
+                    checkin_cli, "_find_codebuddy_cli",
+                    return_value="C:\\Custom\\codebuddy.cmd",
+                ), \
                 mock.patch.object(checkin_cli, "cmd_wx_bind") as bind, \
                 redirect_stdout(StringIO()):
             result = checkin_cli.interactive_config({})
@@ -335,6 +341,10 @@ class WxBindHelpersTest(unittest.TestCase):
         saved = write_config.call_args.args[0]
         self.assertEqual(saved["notify_channel"], "none")
         self.assertFalse(saved["desktop_notify"])
+        self.assertEqual(saved["_auth_mode"], "codebuddy_cli")
+        self.assertEqual(
+            saved["_auth_executable"], "C:\\Custom\\codebuddy.cmd",
+        )
         bind.assert_not_called()
 
 
@@ -650,7 +660,7 @@ class EnvironmentPreflightTest(unittest.TestCase):
                 redirect_stdout(StringIO()):
             result = preflight()
 
-        self.assertTrue(result)
+        self.assertEqual(result, "workbuddy")
         launch.assert_called_once_with(
             ["open", "/Applications/WorkBuddy.app"],
             check=False,
@@ -675,7 +685,7 @@ class EnvironmentPreflightTest(unittest.TestCase):
                 redirect_stdout(StringIO()):
             result = preflight()
 
-        self.assertTrue(result)
+        self.assertEqual(result, "codebuddy_cli")
         login.assert_called_once_with("/usr/local/bin/codebuddy")
 
     def test_user_can_choose_no_workbuddy_mode_when_app_is_installed(self):
@@ -698,9 +708,85 @@ class EnvironmentPreflightTest(unittest.TestCase):
                 redirect_stdout(StringIO()):
             result = checkin_cli._run_environment_preflight()
 
-        self.assertTrue(result)
+        self.assertEqual(result, "codebuddy_cli")
         login.assert_called_once_with("/opt/homebrew/bin/codebuddy")
         workbuddy_launch.assert_not_called()
+
+    def test_reauth_workbuddy_opens_client_and_waits_for_token(self):
+        args = checkin_cli.argparse.Namespace(mode="workbuddy")
+        with mock.patch.object(
+                    checkin_cli, "_find_workbuddy_app",
+                    return_value="C:\\Apps\\WorkBuddy\\WorkBuddy.exe",
+                ), \
+                mock.patch.object(
+                    checkin_cli, "_launch_workbuddy_app", return_value=True,
+                ) as launch, \
+                mock.patch.object(
+                    checkin_cli, "_wait_for_workbuddy_token", return_value=True,
+                ) as wait, redirect_stdout(StringIO()):
+            result = checkin_cli.cmd_reauth(args)
+
+        self.assertEqual(result, 0)
+        launch.assert_called_once_with("C:\\Apps\\WorkBuddy\\WorkBuddy.exe")
+        wait.assert_called_once()
+
+    def test_reauth_cli_opens_browser_authorization(self):
+        args = checkin_cli.argparse.Namespace(mode="codebuddy_cli")
+        with mock.patch.object(
+                    checkin_cli, "_find_codebuddy_cli",
+                    return_value="C:\\Tools\\codebuddy.cmd",
+                ), \
+                mock.patch.object(
+                    checkin_cli, "_launch_codebuddy_login_and_wait",
+                    return_value=True,
+                ) as login, redirect_stdout(StringIO()):
+            result = checkin_cli.cmd_reauth(args)
+
+        self.assertEqual(result, 0)
+        login.assert_called_once_with("C:\\Tools\\codebuddy.cmd")
+
+    def test_reauth_cli_reuses_saved_executable_outside_task_path(self):
+        args = checkin_cli.argparse.Namespace(mode="codebuddy_cli")
+        saved_path = "C:\\Custom\\CodeBuddy\\codebuddy.cmd"
+        with mock.patch.object(
+                    checkin_cli, "read_config",
+                    return_value={
+                        "_auth_mode": "codebuddy_cli",
+                        "_auth_executable": saved_path,
+                    },
+                ), \
+                mock.patch.object(
+                    checkin_cli.os.path, "isfile", return_value=True,
+                ), \
+                mock.patch.object(
+                    checkin_cli, "_find_codebuddy_cli", return_value="",
+                ), \
+                mock.patch.object(
+                    checkin_cli, "_launch_codebuddy_login_and_wait",
+                    return_value=True,
+                ) as login, \
+                mock.patch.object(checkin_cli, "write_config"), \
+                redirect_stdout(StringIO()):
+            result = checkin_cli.cmd_reauth(args)
+
+        self.assertEqual(result, 0)
+        login.assert_called_once_with(saved_path)
+
+    def test_reauth_returns_failure_when_user_does_not_finish_login(self):
+        args = checkin_cli.argparse.Namespace(mode="workbuddy")
+        with mock.patch.object(
+                    checkin_cli, "_find_workbuddy_app",
+                    return_value="/Applications/WorkBuddy.app",
+                ), \
+                mock.patch.object(
+                    checkin_cli, "_launch_workbuddy_app", return_value=True,
+                ), \
+                mock.patch.object(
+                    checkin_cli, "_wait_for_workbuddy_token", return_value=False,
+                ), redirect_stdout(StringIO()):
+            result = checkin_cli.cmd_reauth(args)
+
+        self.assertEqual(result, 1)
 
     def test_wizard_stops_before_writing_when_preflight_fails(self):
         with mock.patch.object(
@@ -1207,6 +1293,113 @@ class WxBindingVerificationTest(unittest.TestCase):
 
         self.assertEqual(result, (True, False, "already_checked_in"))
         post.assert_called_once_with(worker.CHECKIN_STATUS_URL, "token", "uid")
+
+    def test_missing_token_opens_saved_login_mode_then_continues_checkin(self):
+        status_response = {
+            "data": {
+                "today_checked_in": True,
+                "active": True,
+                "streak_days": 1,
+                "total_credits": 10,
+            }
+        }
+        cfg = {"_auth_mode": "codebuddy_cli", "desktop_notify": False}
+        with mock.patch.object(
+                    worker, "extract_token",
+                    side_effect=[None, ("new-token", "uid")],
+                ), \
+                mock.patch.object(
+                    worker, "_launch_reauthentication", return_value=True,
+                ) as reauth, \
+                mock.patch.object(
+                    worker, "_post", return_value=(200, status_response),
+                ), redirect_stdout(StringIO()):
+            result = worker.do_checkin(cfg=cfg)
+
+        self.assertEqual(result, (True, False, "already_checked_in"))
+        reauth.assert_called_once_with(cfg)
+
+    def test_reauthentication_runs_cli_with_saved_mode(self):
+        cfg = {
+            "_auth_mode": "codebuddy_cli",
+            "desktop_notify": False,
+            "notify_channel": "none",
+        }
+        completed = mock.Mock(returncode=0)
+        with mock.patch.object(
+                    worker.subprocess, "run", return_value=completed,
+                ) as run, \
+                mock.patch.object(
+                    worker, "extract_token", return_value=("token", "uid"),
+                ), \
+                mock.patch.object(worker, "notify"):
+            result = worker._launch_reauthentication(cfg)
+
+        self.assertTrue(result)
+        self.assertEqual(run.call_args.args[0], [
+            worker.sys.executable,
+            worker.CHECKIN_CLI_PATH,
+            "reauth",
+            "--mode",
+            "codebuddy_cli",
+        ])
+
+    def test_http_401_reauthenticates_once_and_retries_checkin(self):
+        unauthorized = urllib.error.HTTPError(
+            worker.CHECKIN_CLAIM_URL, 401, "Unauthorized", {},
+            io.BytesIO(b'{"code":401,"msg":"expired"}'),
+        )
+        self.addCleanup(unauthorized.close)
+        status_response = {"data": {"active": False}}
+        recovered_status = {
+            "data": {"active": True, "today_checked_in": True},
+        }
+        cfg = {"_auth_mode": "workbuddy"}
+        with mock.patch.object(
+                    worker, "extract_token",
+                    side_effect=[("old", "uid"), ("new", "uid")],
+                ), \
+                mock.patch.object(
+                    worker, "_post", side_effect=[
+                        (200, status_response), unauthorized,
+                        (200, recovered_status),
+                    ],
+                ), \
+                mock.patch.object(
+                    worker, "_launch_reauthentication", return_value=True,
+                ) as reauth, redirect_stdout(StringIO()):
+            result = worker.do_checkin(cfg=cfg)
+
+        self.assertEqual(result, (True, False, "already_checked_in"))
+        reauth.assert_called_once_with(cfg)
+
+    def test_status_http_401_reauthenticates_before_claiming(self):
+        unauthorized = urllib.error.HTTPError(
+            worker.CHECKIN_STATUS_URL, 401, "Unauthorized", {},
+            io.BytesIO(b'{"code":401,"msg":"expired"}'),
+        )
+        self.addCleanup(unauthorized.close)
+        recovered_status = {
+            "data": {"active": True, "today_checked_in": True},
+        }
+        cfg = {"_auth_mode": "codebuddy_cli"}
+        with mock.patch.object(
+                    worker, "extract_token",
+                    side_effect=[("old", "uid"), ("new", "uid")],
+                ), \
+                mock.patch.object(
+                    worker, "_post", side_effect=[
+                        unauthorized, (200, recovered_status),
+                    ],
+                ) as post, \
+                mock.patch.object(
+                    worker, "_launch_reauthentication", return_value=True,
+                ) as reauth, redirect_stdout(StringIO()):
+            result = worker.do_checkin(cfg=cfg)
+
+        self.assertEqual(result, (True, False, "already_checked_in"))
+        reauth.assert_called_once_with(cfg)
+        self.assertEqual(post.call_count, 2)
 
     def test_notify_sends_system_notification_plus_only_selected_remote_channel(self):
         cfg = {

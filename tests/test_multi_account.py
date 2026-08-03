@@ -427,6 +427,70 @@ class MultiAccountParserTest(unittest.TestCase):
 
 
 class AccountCommandTest(unittest.TestCase):
+    def test_duplicate_workbuddy_account_reports_bound_alias_immediately(self):
+        existing = {
+            "accounts": [{
+                "id": "user-first",
+                "name": "已有账号",
+                "auth": {
+                    "mode": "workbuddy",
+                    "uid": "first-user-uid",
+                    "token": "first-token",
+                },
+            }],
+        }
+        output = StringIO()
+        with mock.patch.object(
+                    cli, "_find_workbuddy_app",
+                    return_value="/Applications/WorkBuddy.app",
+                ), mock.patch.object(
+                    cli, "_launch_workbuddy_app", return_value=True,
+                ), mock.patch.object(
+                    cli, "_wait_for_workbuddy_token",
+                    return_value=cli.CODEBUDDY_LOGIN_DUPLICATE_ACCOUNT,
+                ), redirect_stdout(output):
+            result = cli._capture_different_account_login(
+                existing, "workbuddy", "first-user-uid", "first-token",
+            )
+
+        self.assertIsNone(result)
+        rendered = output.getvalue()
+        self.assertIn("已有账号", rendered)
+        self.assertIn("已绑定", rendered)
+        self.assertIn("本次添加已取消", rendered)
+
+    def test_switching_to_another_saved_workbuddy_account_is_rejected_immediately(self):
+        existing = {
+            "accounts": [{
+                "id": "user-first",
+                "name": "第一个账号",
+                "auth": {"uid": "first-user-uid", "token": "first-token"},
+            }, {
+                "id": "user-second",
+                "name": "第二个账号",
+                "auth": {"uid": "second-user-uid", "token": "second-token"},
+            }],
+        }
+        output = StringIO()
+        with mock.patch.object(
+                    cli, "_find_workbuddy_app",
+                    return_value="/Applications/WorkBuddy.app",
+                ), mock.patch.object(
+                    cli, "_launch_workbuddy_app", return_value=True,
+                ), mock.patch.object(
+                    cli, "_wait_for_workbuddy_token", return_value=True,
+                ), mock.patch.object(
+                    cli, "_capture_current_login",
+                    return_value=("second-token-new", "second-user-uid"),
+                ), redirect_stdout(output):
+            result = cli._capture_different_account_login(
+                existing, "workbuddy", "first-user-uid", "first-token",
+            )
+
+        self.assertIsNone(result)
+        self.assertIn("第二个账号", output.getvalue())
+        self.assertIn("已绑定", output.getvalue())
+
     def test_wizard_saves_authenticated_user_as_first_account(self):
         cfg = {}
         with mock.patch.object(
@@ -540,7 +604,10 @@ class AccountCommandTest(unittest.TestCase):
 
         self.assertEqual(result, 0)
         launch.assert_called_once_with("/Applications/WorkBuddy.app")
-        wait.assert_called_once_with(rejected_uid=first_uid)
+        wait.assert_called_once_with(
+            rejected_uid=first_uid, rejected_token="first-token",
+            initial_auth_marker=mock.ANY,
+        )
         saved = write_config.call_args.args[0]
         self.assertEqual(len(saved["accounts"]), 2)
         self.assertEqual(saved["accounts"][1]["name"], "Second")
@@ -584,7 +651,7 @@ class AccountCommandTest(unittest.TestCase):
 
         self.assertEqual(result, 0)
         capture_different.assert_called_once_with(
-            existing, "codebuddy_cli", first_uid,
+            existing, "codebuddy_cli", first_uid, "first-token",
         )
         saved = write_config.call_args.args[0]
         self.assertEqual(len(saved["accounts"]), 2)
@@ -626,7 +693,10 @@ class AccountCommandTest(unittest.TestCase):
 
         self.assertEqual(result, 1)
         launch.assert_called_once_with("/Applications/WorkBuddy.app")
-        wait.assert_called_once_with(rejected_uid=first_uid)
+        wait.assert_called_once_with(
+            rejected_uid=first_uid, rejected_token="first-token",
+            initial_auth_marker=mock.ANY,
+        )
         write_config.assert_not_called()
 
     def test_account_rename_only_changes_requested_display_name(self):

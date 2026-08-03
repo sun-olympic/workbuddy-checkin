@@ -360,7 +360,10 @@ class WindowsPlatform:
 
             login_methods = (status or {}).get("loginMethods") or []
             method_ids = {item.get("id") for item in login_methods}
-            if "internal" not in method_ids:
+            # 部分 Windows CLI 版本在未登录状态下不会返回 loginMethods，
+            # 但 login 接口仍支持 method=internal；只有明确返回列表且
+            # 列表中没有国内站入口时才判定为不支持。
+            if login_methods and "internal" not in method_ids:
                 raise RuntimeError(
                     "CodeBuddy 登录服务未返回国内站登录入口，请重试。"
                 )

@@ -10,6 +10,7 @@ from workbuddy_platform import (
     UnsupportedPlatformError,
     get_platform,
 )
+import workbuddy_platform.macos as macos_module
 
 
 class PlatformSelectionTest(unittest.TestCase):
@@ -132,6 +133,16 @@ class WindowsPlatformTest(unittest.TestCase):
             encoding="utf-8", errors="replace",
         )
 
+    def test_shared_login_cleanup_stops_workbuddy_without_console_window(self):
+        run = mock.Mock(return_value=(0, "", ""))
+
+        self.assertTrue(hasattr(self.platform, "stop_shared_login_processes"))
+        self.platform.stop_shared_login_processes(run)
+
+        run.assert_called_once_with([
+            "taskkill", "/F", "/T", "/IM", "WorkBuddy.exe",
+        ])
+
 
 class MacOSPlatformTest(unittest.TestCase):
     def test_scheduler_prepare_is_owned_by_macos_adapter(self):
@@ -157,6 +168,61 @@ class MacOSPlatformTest(unittest.TestCase):
                 os.path.join("bin", "python3")
             )
         )
+
+    def test_shared_login_cleanup_quits_workbuddy_gracefully(self):
+        platform = get_platform("darwin")
+        run = mock.Mock(side_effect=[
+            (0, "76137", ""),
+            (0, "", ""),
+            (1, "", ""),
+        ])
+
+        self.assertTrue(hasattr(platform, "stop_shared_login_processes"))
+        platform.stop_shared_login_processes(run)
+
+        self.assertEqual(run.call_args_list, [
+            mock.call([
+                "pgrep", "-f", "WorkBuddy.app/Contents/MacOS/Electron",
+            ]),
+            mock.call([
+                "osascript", "-e",
+                'tell application id "com.workbuddy.workbuddy" to quit',
+            ]),
+            mock.call([
+                "pgrep", "-f", "WorkBuddy.app/Contents/MacOS/Electron",
+            ]),
+        ])
+
+    def test_shared_login_cleanup_does_not_launch_stopped_workbuddy(self):
+        platform = get_platform("darwin")
+        run = mock.Mock(return_value=(1, "", ""))
+
+        platform.stop_shared_login_processes(run)
+
+        run.assert_called_once_with([
+            "pgrep", "-f", "WorkBuddy.app/Contents/MacOS/Electron",
+        ])
+
+    def test_shared_login_cleanup_force_stops_only_after_graceful_timeout(self):
+        platform = get_platform("darwin")
+        run = mock.Mock(return_value=(0, "76137", ""))
+
+        with mock.patch.object(
+            macos_module, "time", create=True,
+        ) as time_module:
+            platform.stop_shared_login_processes(run)
+
+        self.assertEqual(run.call_args_list[0], mock.call([
+            "pgrep", "-f", "WorkBuddy.app/Contents/MacOS/Electron",
+        ]))
+        self.assertEqual(run.call_args_list[1], mock.call([
+            "osascript", "-e",
+            'tell application id "com.workbuddy.workbuddy" to quit',
+        ]))
+        self.assertEqual(run.call_args_list[-1], mock.call([
+            "pkill", "-KILL", "-f", "WorkBuddy.app/Contents/",
+        ]))
+        self.assertEqual(time_module.sleep.call_count, 20)
 
 
 if __name__ == "__main__":

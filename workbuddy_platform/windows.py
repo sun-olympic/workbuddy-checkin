@@ -315,6 +315,10 @@ class WindowsPlatform:
         paths.extend(self.codebuddy_auth_paths(filenames))
         return paths
 
+    def stop_shared_login_processes(self, run):
+        """彻底清理登录态前停止仍可能写回 Token 的 WorkBuddy。"""
+        run(["taskkill", "/F", "/T", "/IM", "WorkBuddy.exe"])
+
     def retry_readonly_removal(self, function, path, error):
         if (isinstance(error, PermissionError)
                 or getattr(error, "winerror", None) == 5):

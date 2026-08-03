@@ -1,4 +1,5 @@
 import importlib.util
+import inspect
 import base64
 import io
 import json
@@ -407,6 +408,56 @@ class EnvironmentPreflightTest(unittest.TestCase):
         self.assertTrue(result)
         sleep.assert_called()
 
+    def test_token_ready_rejects_current_uid_when_switching_accounts(self):
+        self.assertIn(
+            "rejected_uid",
+            inspect.signature(checkin_cli._workbuddy_token_ready).parameters,
+        )
+        with mock.patch.dict(
+                    sys.modules, {"workbuddy_checkin": worker},
+                ), mock.patch.object(
+                    worker, "extract_current_token",
+                    return_value=("token", "first-user-uid"),
+                ):
+            ready = checkin_cli._workbuddy_token_ready(
+                rejected_uid="first-user-uid",
+            )
+
+        self.assertFalse(ready)
+
+    def test_codebuddy_login_forwards_rejected_uid_to_waiter(self):
+        self.assertIn(
+            "rejected_uid",
+            inspect.signature(
+                checkin_cli._launch_codebuddy_login_and_wait,
+            ).parameters,
+        )
+        process = mock.Mock()
+        platform = mock.Mock()
+
+        def login_codebuddy(**kwargs):
+            return kwargs["wait_for_login"](process, kwargs["signal_path"])
+
+        platform.login_codebuddy.side_effect = login_codebuddy
+        with mock.patch.object(
+                    checkin_cli, "_platform_adapter", return_value=platform,
+                ), mock.patch.object(
+                    checkin_cli, "_wait_for_codebuddy_login", return_value=True,
+                ) as wait, redirect_stdout(StringIO()):
+            result = checkin_cli._launch_codebuddy_login_and_wait(
+                "/usr/local/bin/codebuddy",
+                rejected_uid="first-user-uid",
+            )
+
+        self.assertTrue(result)
+        wait.assert_called_once_with(
+            process,
+            mock.ANY,
+            expected_uid=None,
+            rejected_token=None,
+            rejected_uid="first-user-uid",
+        )
+
     def test_macos_codebuddy_login_uses_automatic_menu(self):
         process = mock.Mock()
         process.pid = 4242
@@ -723,7 +774,10 @@ class EnvironmentPreflightTest(unittest.TestCase):
                 ) as launch, \
                 mock.patch.object(
                     checkin_cli, "_wait_for_workbuddy_token", return_value=True,
-                ) as wait, redirect_stdout(StringIO()):
+                ) as wait, \
+                mock.patch.object(checkin_cli, "read_config", return_value={}), \
+                mock.patch.object(checkin_cli, "write_config"), \
+                redirect_stdout(StringIO()):
             result = checkin_cli.cmd_reauth(args)
 
         self.assertEqual(result, 0)
@@ -739,7 +793,10 @@ class EnvironmentPreflightTest(unittest.TestCase):
                 mock.patch.object(
                     checkin_cli, "_launch_codebuddy_login_and_wait",
                     return_value=True,
-                ) as login, redirect_stdout(StringIO()):
+                ) as login, \
+                mock.patch.object(checkin_cli, "read_config", return_value={}), \
+                mock.patch.object(checkin_cli, "write_config"), \
+                redirect_stdout(StringIO()):
             result = checkin_cli.cmd_reauth(args)
 
         self.assertEqual(result, 0)
@@ -858,14 +915,16 @@ class PurgeUninstallTest(unittest.TestCase):
         args = checkin_cli.argparse.Namespace(
             purge=True, purge_codebuddy=True, yes=False,
         )
+        output = StringIO()
         with mock.patch("builtins.input", return_value="n"), \
                 mock.patch.object(checkin_cli, "uninstall") as uninstall, \
                 mock.patch.object(checkin_cli, "_purge_paths") as purge_paths, \
                 mock.patch.object(checkin_cli, "_purge_codebuddy") as purge_codebuddy, \
-                redirect_stdout(StringIO()):
+                redirect_stdout(output):
             result = checkin_cli.cmd_uninstall(args)
 
         self.assertEqual(result, 1)
+        self.assertIn("退出正在运行的 WorkBuddy", output.getvalue())
         uninstall.assert_not_called()
         purge_paths.assert_not_called()
         purge_codebuddy.assert_not_called()
@@ -874,6 +933,7 @@ class PurgeUninstallTest(unittest.TestCase):
         args = checkin_cli.argparse.Namespace(
             purge=True, purge_codebuddy=True, yes=True,
         )
+        output = StringIO()
         with mock.patch.object(
                     checkin_cli, "uninstall", return_value=(True, "removed"),
                 ), \
@@ -883,10 +943,11 @@ class PurgeUninstallTest(unittest.TestCase):
                 mock.patch.object(
                     checkin_cli, "_purge_codebuddy", return_value=(["cli"], []),
                 ) as purge_codebuddy, \
-                redirect_stdout(StringIO()):
+                redirect_stdout(output):
             result = checkin_cli.cmd_uninstall(args)
 
         self.assertEqual(result, 0)
+        self.assertIn("退出正在运行的 WorkBuddy", output.getvalue())
         purge_codebuddy.assert_called_once_with()
 
     def test_codebuddy_purge_targets_include_cli_config_and_shared_login(self):
@@ -913,6 +974,54 @@ class PurgeUninstallTest(unittest.TestCase):
             ),
             targets,
         )
+        self.assertIn(
+            checkin_cli.os.path.expanduser("~/.workbuddy/logs"), targets,
+        )
+
+    def test_codebuddy_purge_stops_shared_clients_before_deleting_login_sources(self):
+        events = []
+        platform = mock.Mock()
+        platform.codebuddy_purge_paths.return_value = []
+        platform.stop_shared_login_processes.side_effect = (
+            lambda run: events.append("stop")
+        )
+
+        def purge_paths(_paths):
+            events.append("purge")
+            return [], []
+
+        with mock.patch.object(
+                    checkin_cli, "_platform_adapter", return_value=platform,
+                ), mock.patch.object(
+                    checkin_cli, "_find_codebuddy_cli", return_value="",
+                ), mock.patch.object(
+                    checkin_cli, "_find_npm_cli", return_value="",
+                ), mock.patch.object(
+                    checkin_cli, "_purge_paths", side_effect=purge_paths,
+                ), mock.patch.object(
+                    checkin_cli, "_workbuddy_token_ready", return_value=False,
+                ):
+            checkin_cli._purge_codebuddy()
+
+        self.assertEqual(events, ["stop", "purge"])
+
+    def test_codebuddy_purge_reports_failure_when_login_token_survives(self):
+        platform = mock.Mock()
+        platform.codebuddy_purge_paths.return_value = []
+        with mock.patch.object(
+                    checkin_cli, "_platform_adapter", return_value=platform,
+                ), mock.patch.object(
+                    checkin_cli, "_find_codebuddy_cli", return_value="",
+                ), mock.patch.object(
+                    checkin_cli, "_find_npm_cli", return_value="",
+                ), mock.patch.object(
+                    checkin_cli, "_purge_paths", return_value=([], []),
+                ), mock.patch.object(
+                    checkin_cli, "_workbuddy_token_ready", return_value=True,
+                ):
+            _, failures = checkin_cli._purge_codebuddy()
+
+        self.assertTrue(any("有效登录态" in item for item in failures))
 
     def test_codebuddy_purge_rejects_unsafe_custom_config_directory(self):
         with mock.patch.dict(
@@ -954,6 +1063,8 @@ class PurgeUninstallTest(unittest.TestCase):
                 ) as run, \
                 mock.patch.object(
                     checkin_cli, "_purge_paths", return_value=([], []),
+                ), mock.patch.object(
+                    checkin_cli, "_workbuddy_token_ready", return_value=False,
                 ):
             removed, failures = checkin_cli._purge_codebuddy()
 
@@ -1050,6 +1161,9 @@ class PurgeUninstallTest(unittest.TestCase):
         )
         self.assertNotIn(checkin_cli.WORKER, targets)
         self.assertNotIn(str(MODULE_PATH), targets)
+        self.assertNotIn(
+            checkin_cli.os.path.expanduser("~/.workbuddy/logs"), targets,
+        )
 
     def test_status_after_purge_reports_absent_configuration_not_defaults(self):
         with tempfile.TemporaryDirectory() as directory:

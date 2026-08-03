@@ -13,8 +13,9 @@ WorkBuddy 签到 · 命令行运行器（CLI）
   python3 checkin_cli.py uninstall --purge      # 卸载并彻底删除所有签到运行配置
   python3 checkin_cli.py uninstall --purge --codebuddy  # 另删除 CodeBuddy CLI 和登录态
   python3 checkin_cli.py status                 # 查看当前配置 / 定时 / 注册状态
+  python3 checkin_cli.py account list           # 管理多个签到账户
   python3 checkin_cli.py wx-bind                 # 微信一键绑定：弹出浏览器，除扫码外全自动
-  python3 checkin_cli.py run [--dry-run|--force|--no-retry]   # 立即手动跑一次
+  python3 checkin_cli.py run [--account ID] [--dry-run|--force|--no-retry]   # 立即手动跑一次
   python3 checkin_cli.py test-notify            # 发送一条测试通知（验证系统通知/微信推送）
 
 说明：
@@ -34,6 +35,7 @@ import re
 import sys
 import json
 import time
+import hashlib
 import argparse
 import subprocess
 import tempfile
@@ -57,6 +59,7 @@ WX_SANDBOX_LOGIN = "https://mp.weixin.qq.com/debug/cgi-bin/sandbox?t=sandbox/log
 WX_TEMPLATE_TITLE = "签到通知"
 WX_TEMPLATE_CONTENT = "结果：{{keyword1.DATA}}\n说明：{{keyword2.DATA}}\n时间：{{keyword3.DATA}}"
 WX_BIND_VENV = os.path.join(BASE_DIR, ".venv-wx-bind")
+WORKBUDDY_LOGS_DIR = os.path.expanduser("~/.workbuddy/logs")
 PLIST_NAME = "com.user.workbuddy-checkin.plist"
 PLIST_SRC = os.path.join(BASE_DIR, PLIST_NAME)
 PLIST_DST = os.path.expanduser(os.path.join("~/Library/LaunchAgents", PLIST_NAME))
@@ -207,6 +210,95 @@ def _find_codebuddy_cli():
     return shutil.which("codebuddy") or shutil.which("cbc") or ""
 
 
+def _capture_current_login(expected_uid=None):
+    """读取当前有效登录凭据；调用方不得将 token 输出到终端。"""
+    import importlib
+    worker = importlib.import_module("workbuddy_checkin")
+    return worker.extract_current_token(expected_uid=expected_uid)
+
+
+def _account_index(cfg, account_id):
+    for index, account in enumerate(cfg.get("accounts") or []):
+        if isinstance(account, dict) and account.get("id") == account_id:
+            return index
+    return None
+
+
+def _account_id_from_uid(uid):
+    """从真实 UID 生成稳定的本地别名，不在配置界面暴露原 UID。"""
+    digest = hashlib.sha256(uid.encode("utf-8")).hexdigest()[:12]
+    return f"user-{digest}"
+
+
+def _account_mode_and_executable(cfg, account, requested_mode="auto"):
+    auth = account.get("auth") or {}
+    mode = requested_mode or "auto"
+    if mode == "auto":
+        mode = auth.get("mode") or cfg.get("_auth_mode") or "auto"
+    if mode == "auto":
+        mode = "workbuddy" if _find_workbuddy_app() else "codebuddy_cli"
+    if mode == "workbuddy":
+        executable = auth.get("executable") or _find_workbuddy_app()
+    else:
+        executable = auth.get("executable") or _find_codebuddy_cli()
+    return mode, executable
+
+
+def _ensure_current_login_account(
+        cfg, current_login, requested_mode="auto", default_name="默认账号"):
+    """将当前登录态写入账户列表；同 UID 已存在时只刷新认证信息。"""
+    if not current_login:
+        return None, False
+    token, uid = current_login
+    token = str(token or "").strip()
+    uid = str(uid or "").strip()
+    if not token or not uid:
+        return None, False
+
+    mode, discovered_executable = _account_mode_and_executable(
+        cfg, {}, requested_mode,
+    )
+    saved_mode = str(cfg.get("_auth_mode") or "auto")
+    saved_executable = str(cfg.get("_auth_executable") or "")
+    executable = (
+        saved_executable if mode == saved_mode and saved_executable
+        else discovered_executable or ""
+    )
+    accounts = list(cfg.get("accounts") or [])
+    for index, item in enumerate(accounts):
+        if not isinstance(item, dict):
+            continue
+        auth = dict(item.get("auth") or {})
+        if str(auth.get("uid") or "").strip() != uid:
+            continue
+        auth.update({
+            "mode": mode,
+            "executable": executable,
+            "token": token,
+            "uid": uid,
+        })
+        updated = dict(item)
+        updated["auth"] = auth
+        accounts[index] = updated
+        cfg["accounts"] = accounts
+        return updated, False
+
+    account = {
+        "id": _account_id_from_uid(uid),
+        "name": default_name,
+        "enabled": True,
+        "auth": {
+            "mode": mode,
+            "executable": executable,
+            "token": token,
+            "uid": uid,
+        },
+    }
+    accounts.append(account)
+    cfg["accounts"] = accounts
+    return account, True
+
+
 def _find_npm_cli():
     """返回 npm 可执行文件；Windows 避开受 PowerShell 策略限制的 npm.ps1。"""
     return _platform_adapter().find_npm(shutil.which)
@@ -248,24 +340,42 @@ def _ensure_codebuddy_cli():
     return cli_path
 
 
-def _workbuddy_token_ready():
+def _workbuddy_token_ready(expected_uid=None, rejected_token=None,
+                           rejected_uid=None):
     """检查 WorkBuddy 是否已产生可用于签到的未过期登录 token。"""
     try:
         import importlib
         worker = importlib.import_module("workbuddy_checkin")
-        return bool(worker.extract_token())
+        login = worker.extract_current_token(
+            expected_uid=expected_uid,
+            rejected_token=rejected_token,
+        )
+        if not login:
+            return False
+        if expected_uid and login[1] != expected_uid:
+            return False
+        if rejected_uid and login[1] == rejected_uid:
+            return False
+        return True
     except Exception:
         return False
 
 
-def _wait_for_workbuddy_token(timeout_seconds=180, poll_seconds=2):
+def _wait_for_workbuddy_token(timeout_seconds=180, poll_seconds=2,
+                              expected_uid=None, rejected_token=None,
+                              rejected_uid=None):
     """等待 WorkBuddy 或 CodeBuddy CLI 产生有效 token。"""
     deadline = time.monotonic() + timeout_seconds
     while time.monotonic() < deadline:
-        if _workbuddy_token_ready():
+        if _workbuddy_token_ready(
+                expected_uid=expected_uid, rejected_token=rejected_token,
+                rejected_uid=rejected_uid):
             return True
         time.sleep(poll_seconds)
-    return _workbuddy_token_ready()
+    return _workbuddy_token_ready(
+        expected_uid=expected_uid, rejected_token=rejected_token,
+        rejected_uid=rejected_uid,
+    )
 
 
 def _codebuddy_login_settings(signal_path):
@@ -286,20 +396,30 @@ def _codebuddy_login_settings(signal_path):
 
 
 def _wait_for_codebuddy_login(process, signal_path, timeout_seconds=180,
-                              poll_seconds=0.5):
+                              poll_seconds=0.5, expected_uid=None,
+                              rejected_token=None, rejected_uid=None):
     """只以可读取的有效 token 判断成功；auth_success 不能替代凭证校验。"""
     deadline = time.monotonic() + timeout_seconds
     while time.monotonic() < deadline:
-        if _workbuddy_token_ready():
+        if _workbuddy_token_ready(
+                expected_uid=expected_uid, rejected_token=rejected_token,
+                rejected_uid=rejected_uid):
             return True
         exit_code = process.poll()
         if exit_code not in (None, 0):
-            return _workbuddy_token_ready()
+            return _workbuddy_token_ready(
+                expected_uid=expected_uid, rejected_token=rejected_token,
+                rejected_uid=rejected_uid,
+            )
         time.sleep(poll_seconds)
-    return _workbuddy_token_ready()
+    return _workbuddy_token_ready(
+        expected_uid=expected_uid, rejected_token=rejected_token,
+        rejected_uid=rejected_uid,
+    )
 
 
-def _launch_codebuddy_login_and_wait(cli_path):
+def _launch_codebuddy_login_and_wait(cli_path, expected_uid=None,
+                                     rejected_token=None, rejected_uid=None):
     """启动独立 CLI 的浏览器登录，并等待其官方登录状态落盘。"""
     print("🔐 正在启动无 WorkBuddy 登录，并自动唤起浏览器。")
     print("   除浏览器中的登录确认外，无需复制 Token；最多等待 180 秒。")
@@ -307,12 +427,20 @@ def _launch_codebuddy_login_and_wait(cli_path):
         signal_path = os.path.join(temp_dir, "auth-success")
         settings = _codebuddy_login_settings(signal_path)
         try:
+            wait_for_login = _wait_for_codebuddy_login
+            if expected_uid or rejected_token or rejected_uid:
+                def wait_for_login(process, path):
+                    return _wait_for_codebuddy_login(
+                        process, path, expected_uid=expected_uid,
+                        rejected_token=rejected_token,
+                        rejected_uid=rejected_uid,
+                    )
             ready = _platform_adapter().login_codebuddy(
                 cli_path=cli_path,
                 base_dir=BASE_DIR,
                 settings=settings,
                 signal_path=signal_path,
-                wait_for_login=_wait_for_codebuddy_login,
+                wait_for_login=wait_for_login,
                 run_command=_run,
             )
         except (OSError, RuntimeError, ValueError, urllib.error.URLError) as e:
@@ -403,6 +531,7 @@ def interactive_config(cfg):
         executable = _find_codebuddy_cli()
         if executable:
             cfg["_auth_executable"] = executable
+    wizard_login = _capture_current_login()
 
     def ask(prompt, default=""):
         try:
@@ -564,9 +693,17 @@ def interactive_config(cfg):
         print("❌ 已取消，未做任何修改。")
         return 0
 
+    wizard_account, account_created = _ensure_current_login_account(
+        cfg, wizard_login, auth_mode,
+    )
     write_config(cfg)
     dst = _prepare_schedule_definition(cfg["_schedule_hour"], cfg["_schedule_minute"])
     print(f"\n✅ 配置已保存：{CONFIG_PATH}")
+    if wizard_account:
+        action = "已自动保存" if account_created else "已刷新"
+        print(f"✅ 向导登录账号{action}：{wizard_account['id']}")
+    else:
+        print("⚠️  未读取到向导登录账号，未更新签到账户列表。")
     if dst:
         print(f"✅ 已生成 plist：{dst}（每天 {cfg['_schedule_hour']:02d}:{cfg['_schedule_minute']:02d} + 登录补跑）")
     else:
@@ -1985,10 +2122,205 @@ def _wx_verify_and_fix_template(cfg, appid, secret, template_id):
         return new_id
 
 
+def _capture_different_account_login(cfg, requested_mode, previous_uid):
+    """引导切换用户，并返回与 previous_uid 不同的当前登录态。"""
+    mode, executable = _account_mode_and_executable(
+        cfg, {}, requested_mode,
+    )
+    print("ℹ️  当前登录用户已经保存，开始添加另一个账户。")
+
+    if mode == "workbuddy":
+        executable = executable or _find_workbuddy_app()
+        if not executable:
+            print("❌ 未找到 WorkBuddy，无法切换账户。")
+            return None
+        if not _launch_workbuddy_app(executable):
+            print("❌ 无法启动 WorkBuddy，请手动打开后重试。")
+            return None
+        print("🔄 请在 WorkBuddy 中退出当前账号并登录要添加的新账号。")
+        print("   脚本会自动识别不同的登录用户，最多等待 180 秒。")
+        ready = _wait_for_workbuddy_token(rejected_uid=previous_uid)
+    else:
+        executable = executable or _ensure_codebuddy_cli()
+        if not executable:
+            return None
+        print("🔄 请在浏览器中选择或登录要添加的新账号。")
+        ready = _launch_codebuddy_login_and_wait(
+            executable, rejected_uid=previous_uid,
+        )
+
+    if not ready:
+        print("❌ 未检测到不同的登录用户，账户未添加。")
+        return None
+    current_login = _capture_current_login()
+    if not current_login or current_login[1] == previous_uid:
+        print("❌ 登录用户没有切换，账户未添加。")
+        return None
+    return current_login
+
+
+def cmd_account_add(args):
+    """把当前登录态保存为一个独立签到账户。"""
+    requested_account_id = (args.account_id or "").strip()
+    if requested_account_id and not re.fullmatch(
+            r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", requested_account_id):
+        print("❌ 账户 ID 仅支持 1-64 位字母、数字、点、下划线和连字符。")
+        return 2
+
+    cfg = read_config()
+    accounts = list(cfg.get("accounts") or [])
+    current_login = _capture_current_login()
+    if not current_login:
+        print("❌ 未找到有效登录态。请先登录对应账号，再重新执行 account add。")
+        return 1
+    token, uid = current_login
+    legacy_account_migrated = False
+    has_legacy_wizard_login = bool(
+        cfg.get("_auth_mode") or cfg.get("_auth_executable")
+    )
+    if not accounts and not requested_account_id and has_legacy_wizard_login:
+        _, legacy_account_migrated = _ensure_current_login_account(
+            cfg, current_login, getattr(args, "auth_mode", "auto"),
+        )
+        accounts = list(cfg.get("accounts") or [])
+    duplicate_uid = next((
+        item for item in accounts
+        if isinstance(item, dict)
+        and ((item.get("auth") or {}).get("uid") or "") == uid
+    ), None)
+    if (not requested_account_id and duplicate_uid is not None
+            and not getattr(args, "replace", False)):
+        switched_login = _capture_different_account_login(
+            cfg, getattr(args, "auth_mode", "auto"), uid,
+        )
+        if not switched_login:
+            return 1
+        token, uid = switched_login
+
+    account_id = requested_account_id or _account_id_from_uid(uid)
+    existing_index = _account_index(cfg, account_id)
+    if existing_index is not None and not getattr(args, "replace", False):
+        print(f"❌ 账户 {account_id} 已存在；如需更新请加 --replace。")
+        return 1
+    for index, item in enumerate(accounts):
+        if index == existing_index or not isinstance(item, dict):
+            continue
+        if ((item.get("auth") or {}).get("uid") or "") == uid:
+            print(f"❌ 此登录用户已绑定到账户 {item.get('id')}，不能重复添加。")
+            return 1
+
+    previous = accounts[existing_index] if existing_index is not None else {}
+    mode, executable = _account_mode_and_executable(
+        cfg, previous, getattr(args, "auth_mode", "auto"),
+    )
+    account = {
+        "id": account_id,
+        "name": (getattr(args, "name", "") or account_id).strip(),
+        "enabled": True,
+        "auth": {
+            "mode": mode,
+            "executable": executable or "",
+            "token": token,
+            "uid": uid,
+        },
+    }
+    if isinstance(previous, dict) and previous.get("notify"):
+        account["notify"] = previous["notify"]
+    if existing_index is None:
+        accounts.append(account)
+    else:
+        accounts[existing_index] = account
+    cfg["accounts"] = accounts
+    write_config(cfg)
+    if legacy_account_migrated:
+        print("✅ 已自动将原向导登录账号迁移到账户列表。")
+    print(f"✅ 已保存账户：{account['name']} ({account_id})，登录凭据未输出。")
+    return 0
+
+
+def cmd_account_list(args):
+    """列出配置的签到账户，不显示 token。"""
+    accounts = read_config().get("accounts") or []
+    if not accounts:
+        print("ℹ️  尚未配置多账户。")
+        return 0
+    print("=== 签到账户 ===")
+    for account in accounts:
+        if not isinstance(account, dict):
+            continue
+        auth = account.get("auth") or {}
+        state = "启用" if account.get("enabled", True) else "停用"
+        uid = auth.get("uid") or "未记录"
+        masked_uid = uid if len(uid) <= 10 else f"{uid[:6]}…{uid[-4:]}"
+        print(
+            f"  {account.get('id')}  {account.get('name') or account.get('id')}"
+            f"  {state}  {auth.get('mode') or 'auto'}  uid={masked_uid}"
+        )
+    return 0
+
+
+def cmd_account_rename(args):
+    """只修改指定签到账户的显示别名。"""
+    new_name = (getattr(args, "name", "") or "").strip()
+    if not new_name:
+        print("❌ 新别名不能为空。")
+        return 2
+
+    cfg = read_config()
+    index = _account_index(cfg, args.account_id)
+    if index is None:
+        print(f"❌ 未找到账户：{args.account_id}")
+        return 1
+
+    accounts = list(cfg.get("accounts") or [])
+    account = dict(accounts[index])
+    old_name = account.get("name") or account.get("id") or args.account_id
+    account["name"] = new_name
+    accounts[index] = account
+    cfg["accounts"] = accounts
+    write_config(cfg)
+    print(
+        f"✅ 账户别名已更新：{old_name} → {new_name} "
+        f"({args.account_id})"
+    )
+    return 0
+
+
+def cmd_account_remove(args):
+    """仅删除指定签到账户配置，不删除共享客户端登录态。"""
+    cfg = read_config()
+    index = _account_index(cfg, args.account_id)
+    if index is None:
+        print(f"❌ 未找到账户：{args.account_id}")
+        return 1
+    accounts = list(cfg.get("accounts") or [])
+    removed = accounts.pop(index)
+    cfg["accounts"] = accounts
+    write_config(cfg)
+    print(f"✅ 已删除账户配置：{removed.get('name') or args.account_id}")
+    return 0
+
+
+def cmd_account_login(args):
+    """为指定账户重新授权，并只更新该账户保存的凭据。"""
+    return cmd_reauth(argparse.Namespace(mode="auto", account=args.account_id))
+
+
 def cmd_reauth(args):
     """按已保存的认证方式打开登录入口，并等待新的有效 token。"""
     cfg = read_config()
-    configured_mode = cfg.get("_auth_mode", "auto")
+    account_id = getattr(args, "account", None)
+    account = None
+    if account_id:
+        index = _account_index(cfg, account_id)
+        if index is None:
+            print(f"❌ 未找到账户：{account_id}")
+            return 1
+        account = cfg["accounts"][index]
+    configured_mode = (
+        ((account.get("auth") or {}).get("mode") or "auto")
+        if account else cfg.get("_auth_mode", "auto")
+    )
     mode = getattr(args, "mode", "auto") or "auto"
     if mode == "auto":
         if configured_mode in ("workbuddy", "codebuddy_cli"):
@@ -1996,9 +2328,18 @@ def cmd_reauth(args):
         else:
             mode = "workbuddy" if _find_workbuddy_app() else "codebuddy_cli"
 
+    if account:
+        mode, saved_executable = _account_mode_and_executable(
+            cfg, account, mode,
+        )
+        rejected_token = ((account.get("auth") or {}).get("token") or "")
+    else:
+        saved_executable = ""
+        rejected_token = ""
+
     if mode == "workbuddy":
         saved_path = (
-            cfg.get("_auth_executable", "")
+            saved_executable or cfg.get("_auth_executable", "")
             if configured_mode == mode else ""
         )
         app_path = (
@@ -2012,10 +2353,18 @@ def cmd_reauth(args):
             print("❌ 无法启动 WorkBuddy，请手动打开后重试。")
             return 1
         print("🔐 Token 已失效，已打开 WorkBuddy，请完成登录。")
-        ready = _wait_for_workbuddy_token()
+        expected_uid = ((account.get("auth") or {}).get("uid") or "") \
+            if account else ""
+        ready = (
+            _wait_for_workbuddy_token(
+                expected_uid=expected_uid,
+                rejected_token=rejected_token,
+            )
+            if expected_uid else _wait_for_workbuddy_token()
+        )
     else:
         saved_path = (
-            cfg.get("_auth_executable", "")
+            saved_executable or cfg.get("_auth_executable", "")
             if configured_mode == mode else ""
         )
         cli_path = (
@@ -2025,12 +2374,43 @@ def cmd_reauth(args):
         if not cli_path:
             print("❌ 未找到 CodeBuddy CLI，请重新运行配置向导。")
             return 1
-        ready = _launch_codebuddy_login_and_wait(cli_path)
+        expected_uid = ((account.get("auth") or {}).get("uid") or "") \
+            if account else ""
+        ready = (
+            _launch_codebuddy_login_and_wait(
+                cli_path, expected_uid=expected_uid,
+                rejected_token=rejected_token,
+            )
+            if expected_uid else _launch_codebuddy_login_and_wait(cli_path)
+        )
 
     if not ready:
         print("❌ 等待重新登录超时，本次签到已停止。")
         return 1
-    if cfg:
+    if account:
+        current_login = _capture_current_login(expected_uid=expected_uid)
+        if not current_login:
+            print("❌ 登录流程结束，但未读取到有效凭据。")
+            return 1
+        token, uid = current_login
+        expected_uid = ((account.get("auth") or {}).get("uid") or "")
+        if expected_uid and uid != expected_uid:
+            print(
+                f"❌ 当前登录用户与账户 {account_id} 不匹配，"
+                "未覆盖该账户凭据。"
+            )
+            return 1
+        auth = dict(account.get("auth") or {})
+        auth.update({
+            "mode": mode,
+            "executable": app_path if mode == "workbuddy" else cli_path,
+            "token": token,
+            "uid": uid,
+        })
+        account["auth"] = auth
+        cfg["accounts"][_account_index(cfg, account_id)] = account
+        write_config(cfg)
+    elif cfg:
         cfg["_auth_mode"] = mode
         cfg["_auth_executable"] = app_path if mode == "workbuddy" else cli_path
         write_config(cfg)
@@ -2061,9 +2441,11 @@ def cmd_uninstall(args):
         print("❌ --codebuddy 必须与 --purge 一起使用。")
         return 2
 
-    if purge_codebuddy and not getattr(args, "yes", False):
-        print("⚠️  将删除 CodeBuddy CLI、全部 CodeBuddy 配置及账号登录态。")
+    if purge_codebuddy:
+        print("⚠️  此操作会退出正在运行的 WorkBuddy。")
+        print("   随后将删除 CodeBuddy CLI、全部 CodeBuddy 配置及账号登录态。")
         print("   这也会清除本机共享的 WorkBuddy/CodeBuddy 登录凭证，且不可恢复。")
+    if purge_codebuddy and not getattr(args, "yes", False):
         try:
             answer = input("确认继续？请输入 y: ").strip().lower()
         except EOFError:
@@ -2155,6 +2537,7 @@ def _codebuddy_purge_targets():
         os.path.join(home, ".codebuddy"),
         os.path.join(home, ".local", "share", "codebuddy"),
         os.path.join(home, ".cache", "codebuddy"),
+        WORKBUDDY_LOGS_DIR,
     ]
     custom_config = os.environ.get("CODEBUDDY_CONFIG_DIR", "").strip()
     if custom_config:
@@ -2178,6 +2561,8 @@ def _codebuddy_purge_targets():
 def _purge_codebuddy():
     """停止服务、移除 npm 包，并清理 CodeBuddy CLI 的所有本地数据。"""
     failures = []
+    _platform_adapter().stop_shared_login_processes(_run)
+
     cli_path = _find_codebuddy_cli()
     if cli_path:
         _run([cli_path, "daemon", "stop"])
@@ -2193,6 +2578,10 @@ def _purge_codebuddy():
 
     removed, path_failures = _purge_paths(_codebuddy_purge_targets())
     failures.extend(path_failures)
+    if _workbuddy_token_ready():
+        failures.append(
+            "清理后仍检测到有效登录态；请确认 WorkBuddy 已退出后重试。"
+        )
     return removed, failures
 
 
@@ -2235,6 +2624,23 @@ def cmd_status(args):
     retry_delay = f"{cfg.get('retry_base_delay', 30)}s" if config_exists else "未配置"
     print(f"  最大重试      : {max_retries}")
     print(f"  退避基数      : {retry_delay}")
+    accounts = cfg.get("accounts") or []
+    if accounts:
+        enabled_count = sum(
+            1 for account in accounts
+            if isinstance(account, dict) and account.get("enabled", True)
+        )
+        print(f"  签到账户      : {enabled_count}/{len(accounts)} 个已启用")
+        for account in accounts:
+            if not isinstance(account, dict):
+                continue
+            account_id = account.get("id") or "未命名"
+            name = account.get("name") or account_id
+            state = "已启用" if account.get("enabled", True) else "已禁用"
+            mode = (account.get("auth") or {}).get("mode") or "auto"
+            print(f"    - {name} ({account_id})：{state} / {mode}")
+    elif config_exists:
+        print("  签到账户      : 单用户兼容模式")
     print(f"  worker 脚本   : {WORKER}")
     for label, value in _platform_adapter().status_rows():
         print(f"  {label:<12}: {value}")
@@ -2245,6 +2651,10 @@ def cmd_status(args):
 
 def cmd_run(args):
     cmd = [PY, WORKER]
+    if getattr(args, "account", None):
+        cmd.extend(["--account", args.account])
+    elif getattr(args, "all_accounts", False):
+        cmd.append("--all")
     if args.dry_run:
         cmd.append("--dry-run")
     if args.force:
@@ -2342,7 +2752,42 @@ def build_parser():
         "--mode", choices=AUTH_MODES, default="auto",
         help="登录方式；auto 优先使用已保存的方式",
     )
+    pa.add_argument("--account", help="只恢复指定签到账户的登录态")
     pa.set_defaults(func=cmd_reauth)
+
+    pac = sub.add_parser("account", help="管理多签到账户")
+    account_sub = pac.add_subparsers(dest="account_cmd", required=True)
+
+    pac_add = account_sub.add_parser(
+        "add", help="保存当前登录态；已保存时引导登录另一账户",
+    )
+    pac_add.add_argument(
+        "account_id", nargs="?",
+        help="可选本地账户 ID；省略时根据登录用户自动生成",
+    )
+    pac_add.add_argument("--name", help="显示名称")
+    pac_add.add_argument(
+        "--auth-mode", choices=("workbuddy", "codebuddy_cli"),
+        default="auto", help="该账户重新登录时使用的方式",
+    )
+    pac_add.add_argument("--replace", action="store_true", help="覆盖同 ID 账户")
+    pac_add.set_defaults(func=cmd_account_add)
+
+    pac_list = account_sub.add_parser("list", help="列出账户（不显示 token）")
+    pac_list.set_defaults(func=cmd_account_list)
+
+    pac_login = account_sub.add_parser("login", help="重新登录指定账户")
+    pac_login.add_argument("account_id")
+    pac_login.set_defaults(func=cmd_account_login)
+
+    pac_rename = account_sub.add_parser("rename", help="修改账户显示别名")
+    pac_rename.add_argument("account_id")
+    pac_rename.add_argument("--name", required=True, help="新的显示别名")
+    pac_rename.set_defaults(func=cmd_account_rename)
+
+    pac_remove = account_sub.add_parser("remove", help="删除指定账户配置")
+    pac_remove.add_argument("account_id")
+    pac_remove.set_defaults(func=cmd_account_remove)
 
     pu = sub.add_parser("uninstall", help="卸载定时任务")
     pu.add_argument(
@@ -2352,7 +2797,8 @@ def build_parser():
     pu.add_argument(
         "--codebuddy", "--purge-codebuddy", dest="purge_codebuddy",
         action="store_true",
-        help="与 --purge 一起使用：另删除 CodeBuddy CLI、配置及账号登录态",
+        help=("与 --purge 一起使用：退出 WorkBuddy，并删除 CodeBuddy CLI、"
+              "配置及账号登录态"),
     )
     pu.add_argument(
         "--yes", action="store_true",
@@ -2367,6 +2813,12 @@ def build_parser():
     pr.add_argument("--dry-run", action="store_true", help="只查询不签到")
     pr.add_argument("--force", action="store_true", help="强制重签")
     pr.add_argument("--no-retry", action="store_true", help="关闭失败重试")
+    account_selection = pr.add_mutually_exclusive_group()
+    account_selection.add_argument("--account", help="只运行指定账户 ID")
+    account_selection.add_argument(
+        "--all", dest="all_accounts", action="store_true",
+        help="运行全部已启用账户（多账户配置下默认行为）",
+    )
     pr.set_defaults(func=cmd_run)
 
     pn = sub.add_parser("test-notify", help="发送一条测试通知")

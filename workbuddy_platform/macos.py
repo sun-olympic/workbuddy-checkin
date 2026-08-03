@@ -2,6 +2,7 @@ import os
 import signal
 import shutil
 import subprocess
+import time
 
 
 class MacOSPlatform:
@@ -128,6 +129,25 @@ class MacOSPlatform:
         ]
         paths.extend(self.codebuddy_auth_paths(filenames))
         return paths
+
+    def stop_shared_login_processes(self, run):
+        """彻底清理登录态前停止仍可能写回 Token 的 WorkBuddy。"""
+        main_pattern = "WorkBuddy.app/Contents/MacOS/Electron"
+        running, _, _ = run(["pgrep", "-f", main_pattern])
+        if running != 0:
+            return
+
+        run([
+            "osascript", "-e",
+            'tell application id "com.workbuddy.workbuddy" to quit',
+        ])
+        for _ in range(20):
+            running, _, _ = run(["pgrep", "-f", main_pattern])
+            if running != 0:
+                return
+            time.sleep(0.25)
+
+        run(["pkill", "-KILL", "-f", "WorkBuddy.app/Contents/"])
 
     def retry_readonly_removal(self, function, path, error):
         del function, path, error

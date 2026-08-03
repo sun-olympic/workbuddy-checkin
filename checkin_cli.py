@@ -501,18 +501,29 @@ def _wait_for_codebuddy_login(process, signal_path, timeout_seconds=180,
                               rejected_token=None, rejected_uid=None):
     """只以可读取的有效 token 判断成功；auth_success 不能替代凭证校验。"""
     def login_result():
-        # 切换账户时，CLI 启动和退出旧账号都可能刷新旧 Token。只有
-        # auth_success hook 明确出现后，才允许判断新 UID 或重复 UID。
-        if rejected_uid and not os.path.exists(signal_path):
+        if rejected_uid:
+            # 新 UID 的官方认证凭证足以证明切换成功，不依赖 hook；
+            # 历史日志不能作为依据，因此认证文件为空时继续等待。
+            current_login = None
+            if _workbuddy_auth_state_marker():
+                current_login = _capture_current_login()
+            if (current_login and current_login[1] != rejected_uid
+                    and (not expected_uid
+                         or current_login[1] == expected_uid)):
+                return True
+
+            # CLI 启动和退出旧账号都可能刷新旧 Token。仍是旧 UID 时，
+            # 只有本次 auth_success 明确出现后才判定为重复账号。
+            if not os.path.exists(signal_path):
+                return False
+            if current_login and current_login[1] == rejected_uid:
+                return CODEBUDDY_LOGIN_DUPLICATE_ACCOUNT
             return False
+
         if _workbuddy_token_ready(
                 expected_uid=expected_uid, rejected_token=rejected_token,
                 rejected_uid=rejected_uid):
             return True
-        if rejected_uid:
-            current_login = _capture_current_login()
-            if current_login and current_login[1] == rejected_uid:
-                return CODEBUDDY_LOGIN_DUPLICATE_ACCOUNT
         return False
 
     deadline = time.monotonic() + timeout_seconds

@@ -446,6 +446,138 @@ class EnvironmentPreflightTest(unittest.TestCase):
 
         self.assertFalse(ready)
 
+    def test_workbuddy_login_with_same_uid_but_refreshed_token_reports_duplicate(self):
+        with mock.patch.object(
+                    checkin_cli, "_workbuddy_token_ready", return_value=False,
+                ), mock.patch.object(
+                    checkin_cli, "_capture_current_login",
+                    return_value=("refreshed-token", "same-user"),
+                ):
+            result = checkin_cli._wait_for_workbuddy_token(
+                timeout_seconds=1,
+                poll_seconds=0,
+                rejected_uid="same-user",
+                rejected_token="old-token",
+            )
+
+        self.assertEqual(
+            result, checkin_cli.CODEBUDDY_LOGIN_DUPLICATE_ACCOUNT,
+        )
+
+    def test_workbuddy_same_uid_auth_state_change_reports_duplicate(self):
+        with mock.patch.object(
+                    checkin_cli, "_workbuddy_token_ready", return_value=False,
+                ), mock.patch.object(
+                    checkin_cli, "_capture_current_login",
+                    return_value=("same-token", "same-user"),
+                ), mock.patch.object(
+                    checkin_cli, "_workbuddy_auth_state_marker",
+                    return_value=("after",),
+                ):
+            result = checkin_cli._wait_for_workbuddy_token(
+                timeout_seconds=1,
+                poll_seconds=0,
+                rejected_uid="same-user",
+                rejected_token="same-token",
+                initial_auth_marker=("before",),
+            )
+
+        self.assertEqual(
+            result, checkin_cli.CODEBUDDY_LOGIN_DUPLICATE_ACCOUNT,
+        )
+
+    def test_workbuddy_token_refresh_without_new_auth_time_keeps_waiting(self):
+        with mock.patch.object(
+                    checkin_cli, "_workbuddy_token_ready", return_value=False,
+                ), mock.patch.object(
+                    checkin_cli, "_capture_current_login",
+                    return_value=("refreshed-token", "same-user"),
+                ), mock.patch.object(
+                    checkin_cli, "_workbuddy_auth_state_marker",
+                    return_value=("same-user", "auth-time-1"),
+                ):
+            result = checkin_cli._wait_for_workbuddy_token(
+                timeout_seconds=0.01,
+                poll_seconds=0,
+                rejected_uid="same-user",
+                rejected_token="old-token",
+                initial_auth_marker=("same-user", "auth-time-1"),
+            )
+
+        self.assertFalse(result)
+
+    def test_workbuddy_logout_intermediate_state_keeps_waiting(self):
+        with mock.patch.object(
+                    checkin_cli, "_workbuddy_token_ready", return_value=False,
+                ), mock.patch.object(
+                    checkin_cli, "_capture_current_login",
+                    return_value=("historical-token", "same-user"),
+                ), mock.patch.object(
+                    checkin_cli, "_workbuddy_auth_state_marker",
+                    return_value=(),
+                ):
+            result = checkin_cli._wait_for_workbuddy_token(
+                timeout_seconds=0.01,
+                poll_seconds=0,
+                rejected_uid="same-user",
+                rejected_token="old-token",
+                initial_auth_marker=("same-user", "auth-time-1"),
+            )
+
+        self.assertFalse(result)
+
+    def test_workbuddy_logout_then_same_account_reports_duplicate(self):
+        calls = 0
+
+        def auth_marker():
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return ()
+            return ("same-user", "auth-time-1")
+
+        with mock.patch.object(
+                    checkin_cli, "_workbuddy_token_ready", return_value=False,
+                ), mock.patch.object(
+                    checkin_cli, "_capture_current_login",
+                    return_value=("new-token", "same-user"),
+                ), mock.patch.object(
+                    checkin_cli, "_workbuddy_auth_state_marker",
+                    side_effect=auth_marker,
+                ):
+            result = checkin_cli._wait_for_workbuddy_token(
+                timeout_seconds=0.01,
+                poll_seconds=0,
+                rejected_uid="same-user",
+                rejected_token="old-token",
+                initial_auth_marker=("same-user", "auth-time-1"),
+            )
+
+        self.assertEqual(
+            result, checkin_cli.CODEBUDDY_LOGIN_DUPLICATE_ACCOUNT,
+        )
+
+    def test_workbuddy_auth_marker_ignores_startup_file_mtime_only(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            auth_path = pathlib.Path(temp_dir) / "workbuddy-desktop.info"
+            auth_path.write_text(json.dumps({
+                "account": {"uid": "same-user"},
+                "auth": {
+                    "accessToken": "same-token",
+                    "lastRefreshTime": "refresh-1",
+                    "expiresAt": "expires-1",
+                },
+            }), encoding="utf-8")
+            with mock.patch.object(
+                        worker, "_codebuddy_auth_paths",
+                        return_value=(str(auth_path),),
+                    ), mock.patch("importlib.import_module", return_value=worker):
+                before = checkin_cli._workbuddy_auth_state_marker()
+                os.utime(auth_path, (time.time() + 2, time.time() + 2))
+                after = checkin_cli._workbuddy_auth_state_marker()
+
+        self.assertEqual(before, after)
+
     def test_codebuddy_login_forwards_rejected_uid_to_waiter(self):
         self.assertIn(
             "rejected_uid",

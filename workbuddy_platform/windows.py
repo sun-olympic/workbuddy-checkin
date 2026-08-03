@@ -1,5 +1,4 @@
 import base64
-import json
 import ntpath
 import os
 import shutil
@@ -8,9 +7,9 @@ import subprocess
 import socket
 import sys
 import time
-import urllib.error
-import urllib.request
 import webbrowser
+
+from .common import run_codebuddy_auth_flow
 
 
 class WindowsPlatform:
@@ -341,58 +340,16 @@ class WindowsPlatform:
             ], cwd=base_dir, stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-            status = None
-            deadline = time.monotonic() + 15
-            while time.monotonic() < deadline:
-                try:
-                    request = urllib.request.Request(
-                        base_url + "/api/v1/auth/account/status",
-                        headers={"x-codebuddy-request": "1"}, method="GET",
-                    )
-                    with urllib.request.urlopen(request, timeout=2) as response:
-                        payload = json.loads(response.read().decode("utf-8"))
-                    status = payload.get("data", payload)
-                    break
-                except (OSError, ValueError, urllib.error.URLError):
-                    if process.poll() not in (None, 0):
-                        break
-                    time.sleep(0.25)
-
-            login_methods = (status or {}).get("loginMethods") or []
-            method_ids = {item.get("id") for item in login_methods}
-            # 部分 Windows CLI 版本在未登录状态下不会返回 loginMethods，
-            # 但 login 接口仍支持 method=internal；只有明确返回列表且
-            # 列表中没有国内站入口时才判定为不支持。
-            if login_methods and "internal" not in method_ids:
-                raise RuntimeError(
-                    "CodeBuddy 登录服务未返回国内站登录入口，请重试。"
-                )
-
-            request = urllib.request.Request(
-                base_url + "/api/v1/auth/account/login",
-                data=json.dumps({"method": "internal"}).encode("utf-8"),
-                headers={
-                    "x-codebuddy-request": "1",
-                    "Content-Type": "application/json",
-                },
-                method="POST",
-            )
-            with urllib.request.urlopen(request, timeout=5) as response:
-                payload = json.loads(response.read().decode("utf-8"))
-            login_data = payload.get("data", payload)
-            if not login_data.get("success"):
-                raise RuntimeError("CodeBuddy 未能启动浏览器登录，请重试。")
-
-            auth_url = login_data.get("authUrl", "")
-            if auth_url:
+            def open_auth_url(auth_url):
                 try:
                     os.startfile(auth_url)
                 except OSError:
                     webbrowser.open(auth_url)
-                print("🌐 已打开 CodeBuddy 国内站登录页，请在浏览器完成授权。")
-            else:
-                print("🌐 CodeBuddy 已触发国内站登录，请在浏览器完成授权。")
-            return wait_for_login(process, signal_path)
+
+            return run_codebuddy_auth_flow(
+                base_url, process, signal_path, wait_for_login,
+                open_auth_url,
+            )
         finally:
             if process is not None:
                 if process.poll() is None:

@@ -375,6 +375,21 @@ class EnvironmentPreflightTest(unittest.TestCase):
             notification["hooks"][0]["command"],
         )
 
+    def test_windows_codebuddy_auth_hook_uses_available_python_command(self):
+        with mock.patch.object(checkin_cli.sys, "platform", "win32"), \
+                mock.patch.object(
+                    checkin_cli.sys, "executable",
+                    "C:\\Program Files\\Python\\python.exe",
+                ):
+            settings = json.loads(checkin_cli._codebuddy_login_settings(
+                "C:\\Temp\\workbuddy auth.done"
+            ))
+
+        command = settings["hooks"]["Notification"][0]["hooks"][0]["command"]
+        self.assertIn("python.exe", command)
+        self.assertIn("Path(", command)
+        self.assertNotIn("touch ", command)
+
     def test_codebuddy_auth_signal_without_bearer_token_is_not_success(self):
         process = mock.Mock()
         process.poll.return_value = 0
@@ -411,6 +426,27 @@ class EnvironmentPreflightTest(unittest.TestCase):
                 )
 
         self.assertEqual(result, "duplicate_account")
+
+    def test_codebuddy_account_switch_ignores_token_refresh_before_auth_signal(self):
+        process = mock.Mock()
+        process.poll.return_value = None
+        with tempfile.TemporaryDirectory() as directory, \
+                mock.patch.object(
+                    checkin_cli, "_workbuddy_token_ready", return_value=False,
+                ), mock.patch.object(
+                    checkin_cli, "_capture_current_login",
+                    return_value=("refreshed-token", "same-user"),
+                ):
+            result = checkin_cli._wait_for_codebuddy_login(
+                process,
+                str(pathlib.Path(directory) / "auth-success"),
+                timeout_seconds=0.01,
+                poll_seconds=0,
+                rejected_token="old-token",
+                rejected_uid="same-user",
+            )
+
+        self.assertFalse(result)
 
     def test_codebuddy_login_waits_for_browser_auth_after_clean_cli_exit(self):
         process = mock.Mock()

@@ -76,6 +76,7 @@ CODEBUDDY_AUTH_FILENAMES = (
     "workbuddy-desktop.info",
 )
 AUTH_MODES = ("auto", "workbuddy", "codebuddy_cli")
+CODEBUDDY_LOGIN_DUPLICATE_ACCOUNT = "duplicate_account"
 
 # 用运行本 CLI 的 python 执行 worker（worker 仅用标准库，任意 python 皆可）
 PY = sys.executable
@@ -222,6 +223,18 @@ def _account_index(cfg, account_id):
         if isinstance(account, dict) and account.get("id") == account_id:
             return index
     return None
+
+
+def _account_alias_in_use(accounts, alias, excluded_index=None):
+    for index, account in enumerate(accounts):
+        if index == excluded_index or not isinstance(account, dict):
+            continue
+        current_alias = (
+            account.get("name") or account.get("id") or ""
+        ).strip()
+        if current_alias == alias:
+            return True
+    return False
 
 
 def _account_id_from_uid(uid):
@@ -399,23 +412,27 @@ def _wait_for_codebuddy_login(process, signal_path, timeout_seconds=180,
                               poll_seconds=0.5, expected_uid=None,
                               rejected_token=None, rejected_uid=None):
     """只以可读取的有效 token 判断成功；auth_success 不能替代凭证校验。"""
-    deadline = time.monotonic() + timeout_seconds
-    while time.monotonic() < deadline:
+    def login_result():
         if _workbuddy_token_ready(
                 expected_uid=expected_uid, rejected_token=rejected_token,
                 rejected_uid=rejected_uid):
             return True
+        if rejected_uid and os.path.exists(signal_path):
+            current_login = _capture_current_login()
+            if current_login and current_login[1] == rejected_uid:
+                return CODEBUDDY_LOGIN_DUPLICATE_ACCOUNT
+        return False
+
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        result = login_result()
+        if result:
+            return result
         exit_code = process.poll()
         if exit_code not in (None, 0):
-            return _workbuddy_token_ready(
-                expected_uid=expected_uid, rejected_token=rejected_token,
-                rejected_uid=rejected_uid,
-            )
+            return login_result()
         time.sleep(poll_seconds)
-    return _workbuddy_token_ready(
-        expected_uid=expected_uid, rejected_token=rejected_token,
-        rejected_uid=rejected_uid,
-    )
+    return login_result()
 
 
 def _launch_codebuddy_login_and_wait(cli_path, expected_uid=None,
@@ -446,6 +463,9 @@ def _launch_codebuddy_login_and_wait(cli_path, expected_uid=None,
         except (OSError, RuntimeError, ValueError, urllib.error.URLError) as e:
             print(f"❌ 无法启动 CodeBuddy CLI：{e}")
             return False
+    if ready == CODEBUDDY_LOGIN_DUPLICATE_ACCOUNT:
+        print("❌ 该登录账号已经绑定，不能使用其他别名重复添加。")
+        return CODEBUDDY_LOGIN_DUPLICATE_ACCOUNT
     if not ready:
         print("❌ 等待登录超时。请确认浏览器授权成功后重试。")
         return False
@@ -2149,6 +2169,8 @@ def _capture_different_account_login(cfg, requested_mode, previous_uid):
             executable, rejected_uid=previous_uid,
         )
 
+    if ready == CODEBUDDY_LOGIN_DUPLICATE_ACCOUNT:
+        return None
     if not ready:
         print("❌ 未检测到不同的登录用户，账户未添加。")
         return None
@@ -2162,6 +2184,7 @@ def _capture_different_account_login(cfg, requested_mode, previous_uid):
 def cmd_account_add(args):
     """把当前登录态保存为一个独立签到账户。"""
     requested_account_id = (args.account_id or "").strip()
+    requested_name = (getattr(args, "name", "") or "").strip()
     if requested_account_id and not re.fullmatch(
             r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", requested_account_id):
         print("❌ 账户 ID 仅支持 1-64 位字母、数字、点、下划线和连字符。")
@@ -2169,7 +2192,25 @@ def cmd_account_add(args):
 
     cfg = read_config()
     accounts = list(cfg.get("accounts") or [])
+    requested_index = (
+        _account_index(cfg, requested_account_id)
+        if requested_account_id else None
+    )
+    if requested_name and _account_alias_in_use(
+            accounts, requested_name, excluded_index=requested_index):
+        print(f"❌ 别名 {requested_name} 已被其他账户使用。")
+        return 1
     current_login = _capture_current_login()
+    if not current_login and accounts and not requested_account_id:
+        previous_uid = next((
+            ((item.get("auth") or {}).get("uid") or "")
+            for item in accounts if isinstance(item, dict)
+            and ((item.get("auth") or {}).get("uid") or "")
+        ), "")
+        if previous_uid:
+            current_login = _capture_different_account_login(
+                cfg, getattr(args, "auth_mode", "auto"), previous_uid,
+            )
     if not current_login:
         print("❌ 未找到有效登录态。请先登录对应账号，再重新执行 account add。")
         return 1
@@ -2215,7 +2256,7 @@ def cmd_account_add(args):
     )
     account = {
         "id": account_id,
-        "name": (getattr(args, "name", "") or account_id).strip(),
+        "name": requested_name or account_id,
         "enabled": True,
         "auth": {
             "mode": mode,
@@ -2273,6 +2314,10 @@ def cmd_account_rename(args):
         return 1
 
     accounts = list(cfg.get("accounts") or [])
+    if _account_alias_in_use(
+            accounts, new_name, excluded_index=index):
+        print(f"❌ 别名 {new_name} 已被其他账户使用。")
+        return 1
     account = dict(accounts[index])
     old_name = account.get("name") or account.get("id") or args.account_id
     account["name"] = new_name

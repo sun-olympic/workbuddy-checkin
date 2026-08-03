@@ -549,6 +549,47 @@ class AccountCommandTest(unittest.TestCase):
             saved["accounts"][1]["id"], cli._account_id_from_uid(second_uid),
         )
 
+    def test_account_add_guides_login_when_saved_account_has_no_local_session(self):
+        first_uid = "first-user-uid"
+        second_uid = "second-user-uid"
+        existing = {
+            "accounts": [{
+                "id": cli._account_id_from_uid(first_uid),
+                "name": "First",
+                "enabled": True,
+                "auth": {
+                    "mode": "codebuddy_cli",
+                    "executable": "/usr/local/bin/codebuddy",
+                    "token": "first-token",
+                    "uid": first_uid,
+                },
+            }],
+        }
+        args = cli.argparse.Namespace(
+            account_id=None,
+            name="Second",
+            auth_mode="codebuddy_cli",
+            replace=False,
+        )
+        with mock.patch.object(cli, "read_config", return_value=existing), \
+                mock.patch.object(
+                    cli, "_capture_current_login", return_value=None,
+                ), mock.patch.object(
+                    cli, "_capture_different_account_login",
+                    return_value=("second-token", second_uid),
+                ) as capture_different, mock.patch.object(
+                    cli, "write_config",
+                ) as write_config, redirect_stdout(StringIO()):
+            result = cli.cmd_account_add(args)
+
+        self.assertEqual(result, 0)
+        capture_different.assert_called_once_with(
+            existing, "codebuddy_cli", first_uid,
+        )
+        saved = write_config.call_args.args[0]
+        self.assertEqual(len(saved["accounts"]), 2)
+        self.assertEqual(saved["accounts"][1]["auth"]["uid"], second_uid)
+
     def test_account_add_switch_timeout_does_not_change_configuration(self):
         first_uid = "first-user-uid"
         existing = {
@@ -642,6 +683,26 @@ class AccountCommandTest(unittest.TestCase):
         self.assertEqual(result, 1)
         write_config.assert_not_called()
 
+    def test_account_rename_rejects_alias_used_by_another_account(self):
+        existing = {
+            "accounts": [
+                {"id": "alice", "name": "Alice", "auth": {"uid": "uid-a"}},
+                {"id": "bob", "name": "Bob", "auth": {"uid": "uid-b"}},
+            ],
+        }
+        args = cli.argparse.Namespace(account_id="bob", name="  Alice  ")
+        output = StringIO()
+        with mock.patch.object(
+                    cli, "read_config", return_value=existing,
+                ), mock.patch.object(
+                    cli, "write_config",
+                ) as write_config, redirect_stdout(output):
+            result = cli.cmd_account_rename(args)
+
+        self.assertEqual(result, 1)
+        self.assertIn("别名 Alice 已被其他账户使用", output.getvalue())
+        write_config.assert_not_called()
+
     def test_account_add_generates_stable_private_id_from_login_uid(self):
         args = cli.argparse.Namespace(
             account_id=None,
@@ -728,6 +789,32 @@ class AccountCommandTest(unittest.TestCase):
             result = getattr(cli, "cmd_account_add", lambda _args: 99)(args)
 
         self.assertEqual(result, 1)
+        write_config.assert_not_called()
+
+    def test_account_add_rejects_alias_used_by_another_account_before_login(self):
+        existing = {
+            "accounts": [{
+                "id": "alice", "name": "Alice", "enabled": True,
+                "auth": {"token": "old-token", "uid": "first-uid"},
+            }],
+        }
+        args = cli.argparse.Namespace(
+            account_id=None, name="  Alice  ", auth_mode="codebuddy_cli",
+            replace=False,
+        )
+        output = StringIO()
+        with mock.patch.object(cli, "read_config", return_value=existing), \
+                mock.patch.object(
+                    cli, "_capture_current_login",
+                    return_value=("new-token", "second-uid"),
+                ) as capture_login, mock.patch.object(
+                    cli, "write_config",
+                ) as write_config, redirect_stdout(output):
+            result = cli.cmd_account_add(args)
+
+        self.assertEqual(result, 1)
+        self.assertIn("别名 Alice 已被其他账户使用", output.getvalue())
+        capture_login.assert_not_called()
         write_config.assert_not_called()
 
     def test_account_remove_only_removes_requested_account(self):

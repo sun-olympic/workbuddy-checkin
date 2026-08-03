@@ -1,8 +1,12 @@
+import json
 import os
-import signal
 import shutil
+import socket
 import subprocess
 import time
+import urllib.error
+import urllib.request
+import webbrowser
 
 
 class MacOSPlatform:
@@ -157,70 +161,94 @@ class MacOSPlatform:
                         wait_for_login, run_command):
         del run_command
         process = None
-        uses_process_group = False
-        expect = shutil.which("expect")
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+            probe.bind(("127.0.0.1", 0))
+            port = probe.getsockname()[1]
+        base_url = "http://127.0.0.1:{}".format(port)
         try:
-            if expect:
-                expect_script = (
-                    'spawn -noecho $env(WORKBUDDY_CODEBUDDY_CLI) '
-                    '--settings $env(WORKBUDDY_CODEBUDDY_SETTINGS)\n'
-                    'set timeout 45\n'
-                    'expect {\n'
-                    '  -re {Select login method} {}\n'
-                    '  timeout { exit 124 }\n'
-                    '  eof { exit 125 }\n'
-                    '}\n'
-                    'set timeout 20\n'
-                    'expect {\n'
-                    '  -re {Enter to login} {}\n'
-                    '  timeout { exit 126 }\n'
-                    '  eof { exit 127 }\n'
-                    '}\n'
-                    'set timeout 2\n'
-                    'expect {\n'
-                    '  -re {Enter to login} { exp_continue }\n'
-                    '  timeout {}\n'
-                    '  eof { exit 128 }\n'
-                    '}\n'
-                    'send -- "\\r"\n'
-                    'interact'
+            process = subprocess.Popen([
+                cli_path, "--serve", "--host", "127.0.0.1",
+                "--port", str(port), "--settings", settings,
+            ], cwd=base_dir, stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+            status = None
+            deadline = time.monotonic() + 15
+            while time.monotonic() < deadline:
+                try:
+                    request = urllib.request.Request(
+                        base_url + "/api/v1/auth/account/status",
+                        headers={"x-codebuddy-request": "1"}, method="GET",
+                    )
+                    with urllib.request.urlopen(request, timeout=2) as response:
+                        payload = json.loads(response.read().decode("utf-8"))
+                    status = payload.get("data", payload)
+                    break
+                except (OSError, ValueError, urllib.error.URLError):
+                    if process.poll() not in (None, 0):
+                        break
+                    time.sleep(0.25)
+
+            if status is None:
+                raise RuntimeError("CodeBuddy 登录服务启动失败，请重试。")
+            login_methods = status.get("loginMethods") or []
+            method_ids = {item.get("id") for item in login_methods}
+            if login_methods and "internal" not in method_ids:
+                raise RuntimeError(
+                    "CodeBuddy 登录服务未返回国内站登录入口，请重试。"
                 )
-                child_env = os.environ.copy()
-                child_env["WORKBUDDY_CODEBUDDY_CLI"] = cli_path
-                child_env["WORKBUDDY_CODEBUDDY_SETTINGS"] = settings
-                process = subprocess.Popen(
-                    [expect, "-c", expect_script], cwd=base_dir,
-                    env=child_env, start_new_session=True,
+
+            if status.get("authenticated"):
+                request = urllib.request.Request(
+                    base_url + "/api/v1/auth/account/logout",
+                    data=b"",
+                    headers={"x-codebuddy-request": "1"},
+                    method="POST",
                 )
-                uses_process_group = True
+                with urllib.request.urlopen(request, timeout=5) as response:
+                    payload = json.loads(response.read().decode("utf-8"))
+                logout_data = payload.get("data", payload)
+                if not logout_data.get("success"):
+                    raise RuntimeError("CodeBuddy 未能退出当前账号，请重试。")
+                # logout 返回时，启动阶段的旧账号刷新任务可能仍在收尾；
+                # 等它结束后再 login，避免旧任务取消新的浏览器会话。
+                time.sleep(1.0)
+
+            # 丢弃 CLI 启动阶段由旧登录态产生的通知信号；最终仍以
+            # 新凭证实际落盘且 UID 改变作为切换成功条件。
+            try:
+                os.remove(signal_path)
+            except FileNotFoundError:
+                pass
+
+            request = urllib.request.Request(
+                base_url + "/api/v1/auth/account/login",
+                data=json.dumps({"method": "internal"}).encode("utf-8"),
+                headers={
+                    "x-codebuddy-request": "1",
+                    "Content-Type": "application/json",
+                },
+                method="POST",
+            )
+            with urllib.request.urlopen(request, timeout=5) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+            login_data = payload.get("data", payload)
+            if not login_data.get("success"):
+                raise RuntimeError("CodeBuddy 未能启动浏览器登录，请重试。")
+
+            auth_url = login_data.get("authUrl", "")
+            if auth_url:
+                webbrowser.open(auth_url)
+                print("🌐 已打开 CodeBuddy 国内站登录页，请在浏览器完成授权。")
             else:
-                process = subprocess.Popen(
-                    [cli_path, "--settings", settings], cwd=base_dir,
-                    stdin=subprocess.PIPE, text=True,
-                )
-                process.stdin.write("/login\n")
-                process.stdin.flush()
+                print("🌐 CodeBuddy 已触发国内站登录，请在浏览器完成授权。")
 
             return wait_for_login(process, signal_path)
         finally:
             if process is not None:
-                if uses_process_group:
-                    try:
-                        os.killpg(process.pid, signal.SIGTERM)
-                    except ProcessLookupError:
-                        pass
-                    except OSError:
-                        if process.poll() is None:
-                            process.terminate()
-                elif process.poll() is None:
+                if process.poll() is None:
                     process.terminate()
                 try:
                     process.wait(timeout=5)
                 except subprocess.TimeoutExpired:
-                    if uses_process_group:
-                        try:
-                            os.killpg(process.pid, signal.SIGKILL)
-                        except ProcessLookupError:
-                            pass
-                    else:
-                        process.kill()
+                    process.kill()

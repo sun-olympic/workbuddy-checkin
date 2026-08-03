@@ -218,11 +218,60 @@ def _capture_current_login(expected_uid=None):
     return worker.extract_current_token(expected_uid=expected_uid)
 
 
+def _workbuddy_auth_state_marker():
+    """读取认证文件中的登录语义标记，不使用文件 mtime 判断授权完成。"""
+    try:
+        import importlib
+        worker = importlib.import_module("workbuddy_checkin")
+        paths = worker._codebuddy_auth_paths()
+    except Exception:
+        return ()
+
+    marker = []
+    for path in paths:
+        try:
+            with open(path, "r", encoding="utf-8") as auth_file:
+                state = json.load(auth_file)
+            auth = state.get("auth") or {}
+            account = state.get("account") or {}
+            auth_time = ""
+            access_token = str(auth.get("accessToken") or "").strip()
+            try:
+                payload = worker._b64decode(access_token.split(".")[1])
+                auth_time = str(payload.get("auth_time") or "")
+            except (IndexError, KeyError, TypeError, ValueError,
+                    json.JSONDecodeError):
+                pass
+            marker.append((
+                path,
+                str(account.get("uid") or ""),
+                auth_time,
+            ))
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            continue
+    return tuple(marker)
+
+
 def _account_index(cfg, account_id):
     for index, account in enumerate(cfg.get("accounts") or []):
         if isinstance(account, dict) and account.get("id") == account_id:
             return index
     return None
+
+
+def _account_label_for_uid(cfg, uid):
+    """返回账户显示别名和 ID，供登录切换提示使用。"""
+    uid = str(uid or "").strip()
+    for account in cfg.get("accounts") or []:
+        if not isinstance(account, dict):
+            continue
+        auth = account.get("auth") or {}
+        if str(auth.get("uid") or "").strip() != uid:
+            continue
+        account_id = str(account.get("id") or "").strip()
+        name = str(account.get("name") or account_id).strip()
+        return f"{name} ({account_id})" if account_id else name
+    return ""
 
 
 def _account_alias_in_use(accounts, alias, excluded_index=None):
@@ -376,19 +425,48 @@ def _workbuddy_token_ready(expected_uid=None, rejected_token=None,
 
 def _wait_for_workbuddy_token(timeout_seconds=180, poll_seconds=2,
                               expected_uid=None, rejected_token=None,
-                              rejected_uid=None):
+                              rejected_uid=None, initial_auth_marker=None):
     """等待 WorkBuddy 或 CodeBuddy CLI 产生有效 token。"""
-    deadline = time.monotonic() + timeout_seconds
-    while time.monotonic() < deadline:
+    saw_logout = False
+
+    def login_result():
+        nonlocal saw_logout
+        current_auth_marker = None
+        if initial_auth_marker is not None:
+            current_auth_marker = _workbuddy_auth_state_marker()
+            # WorkBuddy 退出登录时官方认证文件会短暂消失。此时历史日志
+            # 仍可能返回旧 UID，必须把它视为中间状态并继续等待。
+            if not current_auth_marker:
+                saw_logout = True
+                return False
+        # 重新授权后，同一 UID 可能生成新 Token。不能把它当作“仍未登录”，
+        # 否则用户使用已添加账号时会一直等到超时。
+        if rejected_uid and (rejected_token or initial_auth_marker is not None):
+            current_login = _capture_current_login()
+            if current_login and current_login[1] == rejected_uid:
+                if saw_logout:
+                    return CODEBUDDY_LOGIN_DUPLICATE_ACCOUNT
+                # 同一 UID 重新完成登录时，服务端可能复用原 Token；此时
+                # 认证文件的变更标记是可观测的登录证据，不使用固定超时猜测。
+                if initial_auth_marker is not None:
+                    if current_auth_marker != initial_auth_marker:
+                        return CODEBUDDY_LOGIN_DUPLICATE_ACCOUNT
+                elif rejected_token and current_login[0] != rejected_token:
+                    # 兼容没有认证语义标记的旧调用方。
+                    return CODEBUDDY_LOGIN_DUPLICATE_ACCOUNT
         if _workbuddy_token_ready(
                 expected_uid=expected_uid, rejected_token=rejected_token,
                 rejected_uid=rejected_uid):
             return True
+        return False
+
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        result = login_result()
+        if result:
+            return result
         time.sleep(poll_seconds)
-    return _workbuddy_token_ready(
-        expected_uid=expected_uid, rejected_token=rejected_token,
-        rejected_uid=rejected_uid,
-    )
+    return login_result()
 
 
 def _codebuddy_login_settings(signal_path):
@@ -413,6 +491,11 @@ def _wait_for_codebuddy_login(process, signal_path, timeout_seconds=180,
                               rejected_token=None, rejected_uid=None):
     """只以可读取的有效 token 判断成功；auth_success 不能替代凭证校验。"""
     def login_result():
+        if rejected_uid and rejected_token:
+            current_login = _capture_current_login()
+            if (current_login and current_login[1] == rejected_uid
+                    and current_login[0] != rejected_token):
+                return CODEBUDDY_LOGIN_DUPLICATE_ACCOUNT
         if _workbuddy_token_ready(
                 expected_uid=expected_uid, rejected_token=rejected_token,
                 rejected_uid=rejected_uid):
@@ -2142,13 +2225,16 @@ def _wx_verify_and_fix_template(cfg, appid, secret, template_id):
         return new_id
 
 
-def _capture_different_account_login(cfg, requested_mode, previous_uid):
+def _capture_different_account_login(
+        cfg, requested_mode, previous_uid, previous_token=""):
     """引导切换用户，并返回与 previous_uid 不同的当前登录态。"""
     mode, executable = _account_mode_and_executable(
         cfg, {}, requested_mode,
     )
     print("ℹ️  当前登录用户已经保存，开始添加另一个账户。")
-
+    bound_label = _account_label_for_uid(cfg, previous_uid)
+    if bound_label:
+        print(f"   当前账号：{bound_label}；请切换到尚未添加的账号。")
     if mode == "workbuddy":
         executable = executable or _find_workbuddy_app()
         if not executable:
@@ -2157,26 +2243,48 @@ def _capture_different_account_login(cfg, requested_mode, previous_uid):
         if not _launch_workbuddy_app(executable):
             print("❌ 无法启动 WorkBuddy，请手动打开后重试。")
             return None
+        initial_auth_marker = _workbuddy_auth_state_marker()
         print("🔄 请在 WorkBuddy 中退出当前账号并登录要添加的新账号。")
         print("   脚本会自动识别不同的登录用户，最多等待 180 秒。")
-        ready = _wait_for_workbuddy_token(rejected_uid=previous_uid)
+        ready = _wait_for_workbuddy_token(
+            rejected_uid=previous_uid,
+            rejected_token=previous_token,
+            initial_auth_marker=initial_auth_marker,
+        )
     else:
         executable = executable or _ensure_codebuddy_cli()
         if not executable:
             return None
         print("🔄 请在浏览器中选择或登录要添加的新账号。")
         ready = _launch_codebuddy_login_and_wait(
-            executable, rejected_uid=previous_uid,
+            executable,
+            rejected_token=previous_token,
+            rejected_uid=previous_uid,
         )
 
     if ready == CODEBUDDY_LOGIN_DUPLICATE_ACCOUNT:
+        if bound_label:
+            print(
+                f"❌ 当前登录账号已绑定为 {bound_label}，"
+                "不能使用其他别名重复添加；本次添加已取消。"
+            )
         return None
     if not ready:
         print("❌ 未检测到不同的登录用户，账户未添加。")
         return None
     current_login = _capture_current_login()
-    if not current_login or current_login[1] == previous_uid:
-        print("❌ 登录用户没有切换，账户未添加。")
+    if not current_login:
+        print("❌ 当前登录账号未读取到有效凭据，账户未添加。")
+        return None
+    bound_label = _account_label_for_uid(cfg, current_login[1])
+    if bound_label:
+        print(
+            f"❌ 当前登录账号已绑定为 {bound_label}，"
+            "不能使用其他别名重复添加；本次添加已取消。"
+        )
+        return None
+    if current_login[1] == previous_uid:
+        print("❌ 当前登录账号未切换，账户未添加。")
         return None
     return current_login
 
@@ -2202,14 +2310,16 @@ def cmd_account_add(args):
         return 1
     current_login = _capture_current_login()
     if not current_login and accounts and not requested_account_id:
-        previous_uid = next((
-            ((item.get("auth") or {}).get("uid") or "")
-            for item in accounts if isinstance(item, dict)
+        previous_account = next((
+            item for item in accounts if isinstance(item, dict)
             and ((item.get("auth") or {}).get("uid") or "")
-        ), "")
-        if previous_uid:
+        ), None)
+        if previous_account:
+            previous_auth = previous_account.get("auth") or {}
             current_login = _capture_different_account_login(
-                cfg, getattr(args, "auth_mode", "auto"), previous_uid,
+                cfg, getattr(args, "auth_mode", "auto"),
+                previous_auth.get("uid") or "",
+                previous_auth.get("token") or "",
             )
     if not current_login:
         print("❌ 未找到有效登录态。请先登录对应账号，再重新执行 account add。")
@@ -2232,7 +2342,7 @@ def cmd_account_add(args):
     if (not requested_account_id and duplicate_uid is not None
             and not getattr(args, "replace", False)):
         switched_login = _capture_different_account_login(
-            cfg, getattr(args, "auth_mode", "auto"), uid,
+            cfg, getattr(args, "auth_mode", "auto"), uid, token,
         )
         if not switched_login:
             return 1

@@ -471,7 +471,17 @@ def _wait_for_workbuddy_token(timeout_seconds=180, poll_seconds=2,
 
 def _codebuddy_login_settings(signal_path):
     """跳过首次目录确认；hook 只记录认证事件，不作为登录成功依据。"""
-    hook_path = signal_path.replace("\\", "/")
+    if sys.platform == "win32":
+        hook_code = (
+            "from pathlib import Path; "
+            f"Path({signal_path!r}).touch()"
+        )
+        hook_command = subprocess.list2cmdline([
+            sys.executable, "-c", hook_code,
+        ])
+    else:
+        hook_path = signal_path.replace("\\", "/")
+        hook_command = f"touch {shlex.quote(hook_path)}"
     return json.dumps({
         "trustAll": True,
         "hooks": {
@@ -479,7 +489,7 @@ def _codebuddy_login_settings(signal_path):
                 "matcher": "auth_success",
                 "hooks": [{
                     "type": "command",
-                    "command": f"touch {shlex.quote(hook_path)}",
+                    "command": hook_command,
                 }],
             }],
         },
@@ -491,16 +501,15 @@ def _wait_for_codebuddy_login(process, signal_path, timeout_seconds=180,
                               rejected_token=None, rejected_uid=None):
     """只以可读取的有效 token 判断成功；auth_success 不能替代凭证校验。"""
     def login_result():
-        if rejected_uid and rejected_token:
-            current_login = _capture_current_login()
-            if (current_login and current_login[1] == rejected_uid
-                    and current_login[0] != rejected_token):
-                return CODEBUDDY_LOGIN_DUPLICATE_ACCOUNT
+        # 切换账户时，CLI 启动和退出旧账号都可能刷新旧 Token。只有
+        # auth_success hook 明确出现后，才允许判断新 UID 或重复 UID。
+        if rejected_uid and not os.path.exists(signal_path):
+            return False
         if _workbuddy_token_ready(
                 expected_uid=expected_uid, rejected_token=rejected_token,
                 rejected_uid=rejected_uid):
             return True
-        if rejected_uid and os.path.exists(signal_path):
+        if rejected_uid:
             current_login = _capture_current_login()
             if current_login and current_login[1] == rejected_uid:
                 return CODEBUDDY_LOGIN_DUPLICATE_ACCOUNT

@@ -9,7 +9,7 @@
 - **WorkBuddy 模式**：自动打开已安装的 WorkBuddy，等待登录完成。
 - **无 WorkBuddy 模式**：使用独立 CodeBuddy CLI 打开浏览器登录；未安装 CLI 时，向导可通过 npm 自动安装。
 
-两种模式都只需首次完成一次扫码/授权。脚本直接读取官方登录状态，不会把登录 Token 复制到项目配置。完全免登录不可行，因为签到接口必须携带有效凭证。
+每个账户首次配置时需完成一次扫码/授权。单用户模式直接读取官方登录状态；启用多用户后，因为客户端同一时间只能保留一个当前登录用户，脚本会把每个账户的 Token 保存到已被 Git 忽略的 `checkin_config.json`（macOS 权限设为 `0600`）。请勿分享或提交该文件。完全免登录不可行，因为签到接口必须携带有效凭证。
 
 自动绑定微信时建议已安装 Chrome；Playwright 会自动安装到项目专用环境。
 
@@ -122,6 +122,20 @@ python checkin_cli.py wizard
 
 `config` 不带参数时与 `wizard` 等价。状态中必须显示“定时注册状态：已注册”，否则到点不会执行。
 
+### 什么时候需要执行 install
+
+`wizard` 负责登录和写入配置，`install` 负责把当前时间、Python 路径和脚本路径注册到系统定时任务。首次完成向导后必须执行一次 `install`。
+
+以下情况需要重新执行 `install`：
+
+- 执行过任意 `uninstall` 命令。
+- 修改了每日签到时间。
+- 移动了项目目录，或更换/重装了 Python。
+- `status` 显示定时任务未注册或不完整。
+- Windows 从旧版升级，需要把已有任务更新为 `pythonw.exe` 静默运行。
+
+添加、删除、重命名或重新登录账户，以及修改通知、微信和重试配置时，不需要重新执行 `install`；定时任务每次运行都会读取最新配置。`install` 可以重复执行，会覆盖并刷新任务，不会删除账户。
+
 ## 无 WorkBuddy 模式
 
 ```bash
@@ -183,6 +197,51 @@ python3 checkin_cli.py wx-bind --mode manual
 
 也可手动触发：macOS 执行 `python3 checkin_cli.py reauth`，Windows 执行 `python checkin_cli.py reauth`。
 
+## 多用户签到
+
+原有单用户配置无需迁移。配置多个用户后，同一个定时任务会按顺序签到全部已启用账户；其中一个账户失败不会阻止其他账户继续执行，通知标题会带账户名称。
+
+首次执行 `wizard` 时，向导会把当时的登录用户自动保存为第一个签到账户，无需再对同一用户执行 `account add`。可先查看向导已经保存的账户及其自动生成 ID：
+
+```bash
+# macOS
+python3 checkin_cli.py account list
+
+# Windows PowerShell
+python checkin_cli.py account list
+```
+
+从旧版升级后，如果 `account list` 没有显示原向导账号，请先登录该账号并重新执行一次 `wizard`；向导会按 UID 自动迁移或刷新该账号，不会重复添加。旧配置尚无账户列表时，直接执行无 ID 的 `account add` 也会先迁移原向导账号，再引导切换到新账号。
+
+添加第二个用户时执行 `account add`。脚本发现当前用户已经保存后，会按向导保存的登录方式打开 WorkBuddy 或 CodeBuddy 登录入口；按提示切换到第二个账号，检测到 UID 已变化后自动保存：
+
+```bash
+# macOS
+python3 checkin_cli.py account add --name "Bob"
+
+# Windows PowerShell
+python checkin_cli.py account add --name "Bob"
+```
+
+通常无需填写 `--auth-mode`；需要覆盖向导保存的方式时，可显式使用 `--auth-mode workbuddy` 或 `--auth-mode codebuddy_cli`。
+
+自动 ID 采用 `user-<UID哈希前缀>` 格式，不包含原始 UID。建议让脚本自动生成 ID，并用 `--name` 设置显示名称；之后可用 `account rename` 修改显示名称。
+
+添加账户只会更新配置，不需要再次执行 `install`。
+
+常用账户操作：
+
+```text
+account list                 列出账户，不显示 Token
+account login <账户ID>       为指定账户重新授权
+account rename <账户ID> --name "新别名"  修改显示别名，不影响登录态
+account remove <账户ID>      仅删除该账户配置
+run --account <账户ID>       只运行一个账户
+run --all                    运行所有已启用账户（多用户模式默认行为）
+```
+
+例如账户 ID 为 `user-dcb9b5773cf8` 时，macOS 使用 `python3 checkin_cli.py run --account user-dcb9b5773cf8 --dry-run`，Windows 使用 `python checkin_cli.py run --account user-dcb9b5773cf8 --dry-run`。账户 Token 缺失或失效时，只会按该账户保存的登录方式重新授权；授权成其他用户时不会覆盖原账户凭据。
+
 ## 常用命令
 
 | 操作 | macOS | Windows PowerShell |
@@ -195,9 +254,13 @@ python3 checkin_cli.py wx-bind --mode manual
 | 关闭重试运行 | `python3 checkin_cli.py run --no-retry` | `python checkin_cli.py run --no-retry` |
 | 发送测试通知 | `python3 checkin_cli.py test-notify` | `python checkin_cli.py test-notify` |
 | 重新打开原登录方式 | `python3 checkin_cli.py reauth` | `python checkin_cli.py reauth` |
+| 添加签到账户 | `python3 checkin_cli.py account add --name "Alice"` | `python checkin_cli.py account add --name "Alice"` |
+| 列出签到账户 | `python3 checkin_cli.py account list` | `python checkin_cli.py account list` |
+| 修改账户别名 | `python3 checkin_cli.py account rename <账户ID> --name "新别名"` | `python checkin_cli.py account rename <账户ID> --name "新别名"` |
+| 运行指定账户 | `python3 checkin_cli.py run --account <账户ID>` | `python checkin_cli.py run --account <账户ID>` |
 | 卸载定时任务，保留配置 | `python3 checkin_cli.py uninstall` | `python checkin_cli.py uninstall` |
 | 彻底清理运行数据 | `python3 checkin_cli.py uninstall --purge` | `python checkin_cli.py uninstall --purge` |
-| 连同 CodeBuddy 和登录态一起删除 | `python3 checkin_cli.py uninstall --purge --codebuddy` | `python checkin_cli.py uninstall --purge --codebuddy` |
+| 连同 CodeBuddy 和登录态一起删除（会退出 WorkBuddy） | `python3 checkin_cli.py uninstall --purge --codebuddy` | `python checkin_cli.py uninstall --purge --codebuddy` |
 
 彻底清理会删除任务计划或 plist，以及配置、微信凭证/token 缓存、日志、截图、Python/测试缓存和 Playwright 专用环境；项目源码保留。
 
@@ -210,7 +273,7 @@ python3 checkin_cli.py uninstall
 # 删除定时任务并彻底清理所有签到相关配置
 python3 checkin_cli.py uninstall --purge
 
-# 另行删除 CodeBuddy CLI、全部配置和账号登录态
+# 另行删除 CodeBuddy CLI、共享登录态；执行前会退出 WorkBuddy
 python3 checkin_cli.py uninstall --purge --codebuddy
 ```
 
@@ -222,12 +285,16 @@ python checkin_cli.py uninstall --purge
 python checkin_cli.py uninstall --purge --codebuddy
 ```
 
-默认的 `--purge` 不会删除独立 CodeBuddy CLI 及其账号登录状态。增加
-`--codebuddy` 后会停止 CodeBuddy 后台服务、卸载 npm 全局包，并删除 CodeBuddy
-配置、缓存、原生安装文件和共享认证文件。清理过程不会启动交互式 `/logout`，
-因此不会弹出登录站点选择。该操作可能同时注销 WorkBuddy/CodeBuddy，且不可恢复。
+默认的 `--purge` 会删除签到任务、配置和运行缓存，但保留独立 CodeBuddy CLI 及其登录状态。增加 `--codebuddy` 后会在确认前明确警告，然后：
 
-交互确认适合人工操作；自动清理时可显式跳过确认：
+1. 优雅退出正在运行的 WorkBuddy，并等待进程完全结束；只有退出超时才强制结束。
+2. 停止 CodeBuddy 后台服务并卸载 npm 全局包。
+3. 删除 CodeBuddy 配置、缓存、共享认证文件和含 Token 的 WorkBuddy 日志。
+4. 清理后重新检测登录态；仍发现有效 Token 时报告失败，不会误报清理成功。
+
+该操作会注销 WorkBuddy/CodeBuddy，但不会卸载 WorkBuddy 应用本身。清理过程不会启动交互式 `/logout`，因此不会弹出登录站点选择。
+
+交互确认适合人工操作；自动清理时可显式跳过确认。`--yes` 只跳过输入确认，仍会显示“将退出 WorkBuddy”的影响提示：
 
 ```bash
 python3 checkin_cli.py uninstall --purge --codebuddy --yes

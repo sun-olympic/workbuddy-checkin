@@ -826,9 +826,6 @@ class EnvironmentPreflightTest(unittest.TestCase):
             self._JsonResponse({
                 "data": {
                     "authenticated": False,
-                    "loginMethods": [
-                        {"id": "internal", "label": "国内站点登录"},
-                    ],
                 },
             }),
             self._JsonResponse({"data": {"success": True}}),

@@ -2248,8 +2248,16 @@ def _wx_verify_and_fix_template(cfg, appid, secret, template_id):
 def _capture_different_account_login(
         cfg, requested_mode, previous_uid, previous_token=""):
     """引导切换用户，并返回与 previous_uid 不同的当前登录态。"""
+    previous_account = next((
+        account for account in cfg.get("accounts") or []
+        if isinstance(account, dict)
+        and str((account.get("auth") or {}).get("uid") or "").strip()
+        == str(previous_uid or "").strip()
+    ), {})
     mode, executable = _account_mode_and_executable(
-        cfg, {}, requested_mode,
+        cfg,
+        previous_account if (requested_mode or "auto") == "auto" else {},
+        requested_mode,
     )
     print("ℹ️  当前登录用户已经保存，开始添加另一个账户。")
     bound_label = _account_label_for_uid(cfg, previous_uid)

@@ -240,8 +240,27 @@ class WindowsPlatform:
         return paths
 
     def launch_workbuddy_app(self, app_path):
+        install_dir = ntpath.dirname(app_path)
+        required_resources = (
+            "resources.pak",
+            "chrome_100_percent.pak",
+        )
+        missing_resources = [
+            name for name in required_resources
+            if not os.path.isfile(ntpath.join(install_dir, name))
+        ]
+        if missing_resources:
+            print(
+                "❌ WorkBuddy 安装文件不完整，缺少：{}。"
+                .format(", ".join(missing_resources))
+            )
+            print(
+                "   请重新安装 WorkBuddy，或使用 "
+                "--auth-mode codebuddy_cli 完成登录。"
+            )
+            return False
         try:
-            subprocess.Popen([app_path])
+            subprocess.Popen([app_path], cwd=install_dir)
             return True
         except OSError:
             return False

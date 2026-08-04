@@ -427,6 +427,43 @@ class MultiAccountParserTest(unittest.TestCase):
 
 
 class AccountCommandTest(unittest.TestCase):
+    def test_account_switch_auto_reuses_saved_codebuddy_mode_on_windows(self):
+        codebuddy_path = r"C:\Tools\CodeBuddy\codebuddy.cmd"
+        existing = {
+            "_auth_mode": "workbuddy",
+            "accounts": [{
+                "id": "user-first",
+                "name": "19525468534",
+                "auth": {
+                    "mode": "codebuddy_cli",
+                    "executable": codebuddy_path,
+                    "uid": "first-user-uid",
+                    "token": "first-token",
+                },
+            }],
+        }
+        with mock.patch.object(
+                    cli, "_find_workbuddy_app",
+                    return_value=r"C:\Programs\WorkBuddy\WorkBuddy.exe",
+                ), mock.patch.object(
+                    cli, "_launch_workbuddy_app",
+                    return_value=False,
+                ) as launch_workbuddy, mock.patch.object(
+                    cli, "_launch_codebuddy_login_and_wait",
+                    return_value=cli.CODEBUDDY_LOGIN_DUPLICATE_ACCOUNT,
+                ) as launch_codebuddy, redirect_stdout(StringIO()):
+            result = cli._capture_different_account_login(
+                existing, "auto", "first-user-uid", "first-token",
+            )
+
+        self.assertIsNone(result)
+        launch_workbuddy.assert_not_called()
+        launch_codebuddy.assert_called_once_with(
+            codebuddy_path,
+            rejected_token="first-token",
+            rejected_uid="first-user-uid",
+        )
+
     def test_duplicate_workbuddy_account_reports_bound_alias_immediately(self):
         existing = {
             "accounts": [{

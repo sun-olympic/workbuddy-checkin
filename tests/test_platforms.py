@@ -94,6 +94,19 @@ class WindowsPlatformTest(unittest.TestCase):
 
         self.assertEqual(result, custom_path)
 
+    def test_workbuddy_launch_rejects_incomplete_electron_install(self):
+        app_path = r"C:\Users\tester\AppData\Local\Programs\WorkBuddy\WorkBuddy.exe"
+        with mock.patch(
+                    "workbuddy_platform.windows.os.path.isfile",
+                    return_value=False,
+                ), mock.patch(
+                    "workbuddy_platform.windows.subprocess.Popen",
+                ) as popen:
+            result = self.platform.launch_workbuddy_app(app_path)
+
+        self.assertFalse(result)
+        popen.assert_not_called()
+
     def test_runtime_paths_use_windows_layout(self):
         with mock.patch.dict(os.environ, {
             "LOCALAPPDATA": r"C:\Users\tester\AppData\Local",

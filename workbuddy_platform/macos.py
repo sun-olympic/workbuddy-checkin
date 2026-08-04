@@ -1,7 +1,11 @@
 import os
-import signal
 import shutil
+import socket
 import subprocess
+import time
+import webbrowser
+
+from .common import run_codebuddy_auth_flow
 
 
 class MacOSPlatform:
@@ -129,6 +133,25 @@ class MacOSPlatform:
         paths.extend(self.codebuddy_auth_paths(filenames))
         return paths
 
+    def stop_shared_login_processes(self, run):
+        """彻底清理登录态前停止仍可能写回 Token 的 WorkBuddy。"""
+        main_pattern = "WorkBuddy.app/Contents/MacOS/Electron"
+        running, _, _ = run(["pgrep", "-f", main_pattern])
+        if running != 0:
+            return
+
+        run([
+            "osascript", "-e",
+            'tell application id "com.workbuddy.workbuddy" to quit',
+        ])
+        for _ in range(20):
+            running, _, _ = run(["pgrep", "-f", main_pattern])
+            if running != 0:
+                return
+            time.sleep(0.25)
+
+        run(["pkill", "-KILL", "-f", "WorkBuddy.app/Contents/"])
+
     def retry_readonly_removal(self, function, path, error):
         del function, path, error
         return False
@@ -137,70 +160,25 @@ class MacOSPlatform:
                         wait_for_login, run_command):
         del run_command
         process = None
-        uses_process_group = False
-        expect = shutil.which("expect")
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+            probe.bind(("127.0.0.1", 0))
+            port = probe.getsockname()[1]
+        base_url = "http://127.0.0.1:{}".format(port)
         try:
-            if expect:
-                expect_script = (
-                    'spawn -noecho $env(WORKBUDDY_CODEBUDDY_CLI) '
-                    '--settings $env(WORKBUDDY_CODEBUDDY_SETTINGS)\n'
-                    'set timeout 45\n'
-                    'expect {\n'
-                    '  -re {Select login method} {}\n'
-                    '  timeout { exit 124 }\n'
-                    '  eof { exit 125 }\n'
-                    '}\n'
-                    'set timeout 20\n'
-                    'expect {\n'
-                    '  -re {Enter to login} {}\n'
-                    '  timeout { exit 126 }\n'
-                    '  eof { exit 127 }\n'
-                    '}\n'
-                    'set timeout 2\n'
-                    'expect {\n'
-                    '  -re {Enter to login} { exp_continue }\n'
-                    '  timeout {}\n'
-                    '  eof { exit 128 }\n'
-                    '}\n'
-                    'send -- "\\r"\n'
-                    'interact'
-                )
-                child_env = os.environ.copy()
-                child_env["WORKBUDDY_CODEBUDDY_CLI"] = cli_path
-                child_env["WORKBUDDY_CODEBUDDY_SETTINGS"] = settings
-                process = subprocess.Popen(
-                    [expect, "-c", expect_script], cwd=base_dir,
-                    env=child_env, start_new_session=True,
-                )
-                uses_process_group = True
-            else:
-                process = subprocess.Popen(
-                    [cli_path, "--settings", settings], cwd=base_dir,
-                    stdin=subprocess.PIPE, text=True,
-                )
-                process.stdin.write("/login\n")
-                process.stdin.flush()
-
-            return wait_for_login(process, signal_path)
+            process = subprocess.Popen([
+                cli_path, "--serve", "--host", "127.0.0.1",
+                "--port", str(port), "--settings", settings,
+            ], cwd=base_dir, stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            return run_codebuddy_auth_flow(
+                base_url, process, signal_path, wait_for_login,
+                webbrowser.open,
+            )
         finally:
             if process is not None:
-                if uses_process_group:
-                    try:
-                        os.killpg(process.pid, signal.SIGTERM)
-                    except ProcessLookupError:
-                        pass
-                    except OSError:
-                        if process.poll() is None:
-                            process.terminate()
-                elif process.poll() is None:
+                if process.poll() is None:
                     process.terminate()
                 try:
                     process.wait(timeout=5)
                 except subprocess.TimeoutExpired:
-                    if uses_process_group:
-                        try:
-                            os.killpg(process.pid, signal.SIGKILL)
-                        except ProcessLookupError:
-                            pass
-                    else:
-                        process.kill()
+                    process.kill()

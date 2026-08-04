@@ -23,6 +23,7 @@ WorkBuddy 每日签到脚本（HTTP 直连版，macOS / Windows）
     python3 workbuddy_checkin.py --dry-run  # 只查询签到状态，不签到
     python3 workbuddy_checkin.py --force    # 忽略「今日已签」强制再签一次
     python3 workbuddy_checkin.py --no-retry # 关闭失败自动重试
+    python3 workbuddy_checkin.py --account alice  # 只运行指定多用户账户
 
 通知：
     - 默认弹 macOS / Windows 系统通知。
@@ -116,6 +117,65 @@ def load_config():
     return cfg
 
 
+def account_jobs(cfg, selected=None):
+    """把配置转换为待执行账户；旧配置保持为一个隐式单账户。"""
+    accounts = cfg.get("accounts")
+    if not isinstance(accounts, list) or not accounts:
+        if selected:
+            raise ValueError(f"未找到账户：{selected}")
+        return [{
+            "id": None,
+            "name": None,
+            "config": dict(cfg),
+            "token": None,
+        }]
+
+    jobs = []
+    matched = False
+    global_cfg = dict(cfg)
+    global_cfg.pop("accounts", None)
+    for account in accounts:
+        if not isinstance(account, dict):
+            continue
+        account_id = str(account.get("id") or "").strip()
+        if not account_id:
+            continue
+        if selected and account_id != selected:
+            continue
+        matched = matched or account_id == selected
+        if not account.get("enabled", True):
+            continue
+
+        runtime_cfg = dict(global_cfg)
+        notification = account.get("notify")
+        if isinstance(notification, dict):
+            runtime_cfg.update(notification)
+        auth = account.get("auth")
+        if not isinstance(auth, dict):
+            auth = {}
+        runtime_cfg.update({
+            "_account_id": account_id,
+            "_account_name": str(account.get("name") or account_id),
+            "_account_uid": str(auth.get("uid") or ""),
+            "_auth_mode": str(auth.get("mode") or "auto"),
+            "_auth_executable": str(auth.get("executable") or ""),
+        })
+        token = str(auth.get("token") or "").strip()
+        uid = str(auth.get("uid") or "").strip()
+        jobs.append({
+            "id": account_id,
+            "name": runtime_cfg["_account_name"],
+            "config": runtime_cfg,
+            "token": (token, uid) if token and uid else None,
+        })
+
+    if selected and not matched:
+        raise ValueError(f"未找到账户：{selected}")
+    if selected and not jobs:
+        raise ValueError(f"账户已禁用：{selected}")
+    return jobs
+
+
 # ------------------------- token 提取 -------------------------
 def _b64decode(seg: str) -> dict:
     seg += "=" * (-len(seg) % 4)
@@ -131,7 +191,7 @@ def _codebuddy_auth_paths():
     return platform.codebuddy_auth_paths(CODEBUDDY_AUTH_FILENAMES)
 
 
-def extract_token():
+def extract_token(expected_uid=None):
     """
     从 CodeBuddy CLI 登录状态或 WorkBuddy 主线程日志提取最新有效 token。
     返回 (token, uid)，找不到返回 None。
@@ -152,7 +212,9 @@ def extract_token():
             payload = _b64decode(token.split(".")[1])
             exp = float(payload.get("exp") or 0)
             uid = payload.get("sub") or (state.get("account") or {}).get("uid")
-            if exp > now and uid and (best is None or exp > best[0]):
+            if (exp > now and uid
+                    and (not expected_uid or uid == expected_uid)
+                    and (best is None or exp > best[0])):
                 best = (exp, token, uid)
         except (OSError, ValueError, TypeError, KeyError, IndexError, json.JSONDecodeError):
             continue
@@ -164,7 +226,8 @@ def extract_token():
             if not fn.startswith("workbuddyMainThread"):
                 continue
             try:
-                data = open(os.path.join(root, fn), "rb").read().decode("utf-8", "replace")
+                with open(os.path.join(root, fn), "rb") as log_file:
+                    data = log_file.read().decode("utf-8", "replace")
             except Exception:
                 continue
             for m in jwt_re.finditer(data):
@@ -173,11 +236,83 @@ def extract_token():
                     payload = _b64decode(tok.split(".")[1])
                     exp = payload.get("exp") or 0
                     uid = payload.get("sub")
-                    if exp > now and (best is None or exp > best[0]):
+                    if (exp > now and uid
+                            and (not expected_uid or uid == expected_uid)
+                            and (best is None or exp > best[0])):
                         best = (exp, tok, uid)
                 except Exception:
                     pass
     return (best[1], best[2]) if best else None
+
+
+def extract_current_token(expected_uid=None, rejected_token=None):
+    """读取当前登录用户，而不是从全部历史记录中选择最长有效期。
+
+    官方认证文件代表当前客户端登录态，优先级高于 WorkBuddy 历史日志；
+    没有认证文件时，才使用最近写入日志的最后一个有效 Token。
+    """
+    jwt_re = re.compile(
+        r'Bearer\s+(eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+)'
+    )
+    now = datetime.datetime.now(datetime.timezone.utc).timestamp()
+
+    auth_candidates = []
+    for auth_path in _codebuddy_auth_paths():
+        try:
+            with open(auth_path, "r", encoding="utf-8") as auth_file:
+                state = json.load(auth_file)
+            token = str((state.get("auth") or {}).get("accessToken") or "").strip()
+            payload = _b64decode(token.split(".")[1])
+            exp = float(payload.get("exp") or 0)
+            uid = payload.get("sub") or (state.get("account") or {}).get("uid")
+            if exp > now and uid:
+                auth_candidates.append(
+                    (os.path.getmtime(auth_path), token, uid),
+                )
+        except (OSError, ValueError, TypeError, KeyError, IndexError,
+                json.JSONDecodeError):
+            continue
+    if auth_candidates:
+        _, token, uid = max(auth_candidates, key=lambda item: item[0])
+        if (expected_uid and uid != expected_uid) or token == rejected_token:
+            return None
+        return token, uid
+
+    log_candidates = []
+    if not os.path.isdir(LOGS_DIR):
+        return None
+    for root, _, files in os.walk(LOGS_DIR):
+        for filename in files:
+            if not filename.startswith("workbuddyMainThread"):
+                continue
+            log_path = os.path.join(root, filename)
+            try:
+                with open(log_path, "rb") as log_file:
+                    data = log_file.read().decode("utf-8", "replace")
+                modified_at = os.path.getmtime(log_path)
+            except OSError:
+                continue
+            for match in jwt_re.finditer(data):
+                token = match.group(1)
+                try:
+                    payload = _b64decode(token.split(".")[1])
+                    exp = float(payload.get("exp") or 0)
+                    uid = payload.get("sub")
+                except (ValueError, TypeError, KeyError, IndexError,
+                        json.JSONDecodeError):
+                    continue
+                if exp > now and uid:
+                    log_candidates.append(
+                        (modified_at, match.start(), token, uid),
+                    )
+    if not log_candidates:
+        return None
+    _, _, token, uid = max(
+        log_candidates, key=lambda item: (item[0], item[1]),
+    )
+    if (expected_uid and uid != expected_uid) or token == rejected_token:
+        return None
+    return token, uid
 
 
 # ------------------------- HTTP 请求 -------------------------
@@ -422,6 +557,9 @@ def _launch_reauthentication(cfg):
         sys.executable, CHECKIN_CLI_PATH,
         "reauth", "--mode", mode,
     ]
+    account_id = (cfg.get("_account_id") or "").strip()
+    if account_id:
+        command.extend(["--account", account_id])
     try:
         completed = subprocess.run(
             command, cwd=BASE_DIR, check=False, timeout=210,
@@ -435,7 +573,19 @@ def _launch_reauthentication(cfg):
     if completed.returncode != 0:
         logger.error("重新登录未完成（exit=%s）", completed.returncode)
         return None
-    token = extract_token()
+    token = None
+    if account_id:
+        for account in load_config().get("accounts") or []:
+            if not isinstance(account, dict) or account.get("id") != account_id:
+                continue
+            auth = account.get("auth") or {}
+            saved_token = str(auth.get("token") or "").strip()
+            saved_uid = str(auth.get("uid") or "").strip()
+            if saved_token and saved_uid:
+                token = (saved_token, saved_uid)
+            break
+    else:
+        token = extract_token()
     if not token:
         logger.error("重新登录流程结束，但仍未找到有效 token")
         return None
@@ -443,8 +593,11 @@ def _launch_reauthentication(cfg):
     return token
 
 
+_TOKEN_UNSET = object()
+
+
 def do_checkin(dry_run=False, force=False, cfg=None, _allow_reauth=True,
-               _token_override=None):
+               _token_override=_TOKEN_UNSET):
     """
     执行一次签到尝试。
     返回 (ok: bool, transient: bool, outcome: str)：
@@ -453,12 +606,20 @@ def do_checkin(dry_run=False, force=False, cfg=None, _allow_reauth=True,
       - ok=False, transient=False ：确定性失败（无 token / token 过期 / 未知错误），不可重试
     """
     cfg = cfg or load_config()
-    tok_uid = _token_override or extract_token()
+    # 多账户任务必须只使用其显式保存的凭据；None 表示该账户没有凭据，
+    # 不能再回退扫描另一账户当前写入的 WorkBuddy/CodeBuddy 全局登录态。
+    tok_uid = (
+        extract_token()
+        if _token_override is _TOKEN_UNSET
+        else _token_override
+    )
     if not tok_uid:
         if not dry_run and _allow_reauth:
             recovered = _launch_reauthentication(cfg)
             if recovered:
-                token_override = recovered if isinstance(recovered, tuple) else None
+                token_override = (
+                    recovered if isinstance(recovered, tuple) else _TOKEN_UNSET
+                )
                 return do_checkin(
                     dry_run=dry_run, force=force, cfg=cfg,
                     _allow_reauth=False, _token_override=token_override,
@@ -481,7 +642,9 @@ def do_checkin(dry_run=False, force=False, cfg=None, _allow_reauth=True,
             logger.warning("状态接口拒绝 Token，尝试重新登录")
             recovered = _launch_reauthentication(cfg)
             if recovered:
-                token_override = recovered if isinstance(recovered, tuple) else None
+                token_override = (
+                    recovered if isinstance(recovered, tuple) else _TOKEN_UNSET
+                )
                 return do_checkin(
                     dry_run=dry_run, force=force, cfg=cfg,
                     _allow_reauth=False, _token_override=token_override,
@@ -524,7 +687,9 @@ def do_checkin(dry_run=False, force=False, cfg=None, _allow_reauth=True,
             logger.warning("Token 被服务端拒绝，尝试重新登录")
             recovered = _launch_reauthentication(cfg)
             if recovered:
-                token_override = recovered if isinstance(recovered, tuple) else None
+                token_override = (
+                    recovered if isinstance(recovered, tuple) else _TOKEN_UNSET
+                )
                 return do_checkin(
                     dry_run=dry_run, force=force, cfg=cfg,
                     _allow_reauth=False, _token_override=token_override,
@@ -590,13 +755,21 @@ def build_test_message():
     return f"{title}【测试】", f"【测试消息】{message}"
 
 
-def main():
-    _configure_console()
-    args = sys.argv[1:]
+def _selected_account(args):
+    if "--account" not in args:
+        return None
+    index = args.index("--account")
+    if index + 1 >= len(args) or args[index + 1].startswith("--"):
+        raise ValueError("--account 需要账户 ID")
+    return args[index + 1]
+
+
+def _run_account_job(job, args):
+    """运行单个账户，返回是否成功。"""
     dry = "--dry-run" in args
     force = "--force" in args
     no_retry = "--no-retry" in args
-    cfg = load_config()
+    cfg = job["config"]
 
     max_retries = 0 if no_retry else int(cfg.get("max_retries", MAX_RETRIES))
     base_delay = int(cfg.get("retry_base_delay", RETRY_BASE_DELAY))
@@ -607,9 +780,14 @@ def main():
     outcome = "failed"
     while True:
         attempt += 1
-        ok, transient, outcome = do_checkin(
-            dry_run=dry, force=force, cfg=cfg,
-        )
+        checkin_kwargs = {
+            "dry_run": dry,
+            "force": force,
+            "cfg": cfg,
+        }
+        if job["id"] is not None:
+            checkin_kwargs["_token_override"] = job["token"]
+        ok, transient, outcome = do_checkin(**checkin_kwargs)
         if ok or not transient or attempt > max_retries:
             break
         delay = base_delay * (2 ** (attempt - 1))
@@ -626,13 +804,35 @@ def main():
         logger.info("共尝试 %d 次，结果 ok=%s", attempt, ok)
 
     title, message = classify_message(ok, transient, outcome=outcome)
+    if job["id"]:
+        title = f"[{job['name']}] {title}"
     if dry:
         # dry-run 仅查询，不弹通知（避免每次手动查询都打扰）
         logger.info("[dry-run] 跳过通知发送（title=%s）", title)
     else:
         notify(title, message, cfg)
 
-    sys.exit(0 if ok else 1)
+    return ok
+
+
+def main():
+    _configure_console()
+    args = sys.argv[1:]
+    cfg = load_config()
+    try:
+        jobs = account_jobs(cfg, selected=_selected_account(args))
+    except ValueError as exc:
+        print(f"❌ {exc}")
+        sys.exit(2)
+
+    all_ok = True
+    for job in jobs:
+        if job["id"]:
+            print(f"\n=== 账户：{job['name']} ({job['id']}) ===")
+        if not _run_account_job(job, args):
+            all_ok = False
+
+    sys.exit(0 if all_ok else 1)
 
 
 if __name__ == "__main__":

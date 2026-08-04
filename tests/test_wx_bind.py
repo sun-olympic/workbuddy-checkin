@@ -1,10 +1,10 @@
 import importlib.util
+import inspect
 import base64
 import io
 import json
 import os
 import pathlib
-import signal
 import socket
 import stat
 import sys
@@ -375,6 +375,21 @@ class EnvironmentPreflightTest(unittest.TestCase):
             notification["hooks"][0]["command"],
         )
 
+    def test_windows_codebuddy_auth_hook_uses_available_python_command(self):
+        with mock.patch.object(checkin_cli.sys, "platform", "win32"), \
+                mock.patch.object(
+                    checkin_cli.sys, "executable",
+                    "C:\\Program Files\\Python\\python.exe",
+                ):
+            settings = json.loads(checkin_cli._codebuddy_login_settings(
+                "C:\\Temp\\workbuddy auth.done"
+            ))
+
+        command = settings["hooks"]["Notification"][0]["hooks"][0]["command"]
+        self.assertIn("python.exe", command)
+        self.assertIn("Path(", command)
+        self.assertNotIn("touch ", command)
+
     def test_codebuddy_auth_signal_without_bearer_token_is_not_success(self):
         process = mock.Mock()
         process.poll.return_value = 0
@@ -389,6 +404,99 @@ class EnvironmentPreflightTest(unittest.TestCase):
                 )
 
         self.assertFalse(result)
+
+    def test_codebuddy_auth_signal_for_rejected_uid_reports_duplicate_account(self):
+        process = mock.Mock()
+        process.poll.return_value = None
+        with tempfile.TemporaryDirectory() as directory:
+            signal_path = pathlib.Path(directory) / "auth-success"
+            signal_path.touch()
+            with mock.patch.object(
+                        checkin_cli, "_workbuddy_token_ready",
+                        return_value=False,
+                    ), mock.patch.object(
+                        checkin_cli, "_workbuddy_auth_state_marker",
+                        return_value="current-auth-marker",
+                    ), mock.patch.object(
+                        checkin_cli, "_capture_current_login",
+                        return_value=("old-token", "same-user"),
+                    ):
+                result = checkin_cli._wait_for_codebuddy_login(
+                    process,
+                    str(signal_path),
+                    timeout_seconds=0,
+                    rejected_uid="same-user",
+                )
+
+        self.assertEqual(result, "duplicate_account")
+
+    def test_codebuddy_same_account_after_logout_does_not_need_auth_signal(self):
+        process = mock.Mock()
+        process.poll.side_effect = [None, 1]
+        auth_markers = iter(["", "new-auth-marker", "new-auth-marker"])
+        with tempfile.TemporaryDirectory() as directory, \
+                mock.patch.object(
+                    checkin_cli, "_workbuddy_auth_state_marker",
+                    side_effect=lambda: next(auth_markers),
+                ), mock.patch.object(
+                    checkin_cli, "_capture_current_login",
+                    return_value=("same-token", "same-user"),
+                ), mock.patch.object(checkin_cli.time, "sleep"):
+            result = checkin_cli._wait_for_codebuddy_login(
+                process,
+                str(pathlib.Path(directory) / "auth-success"),
+                timeout_seconds=1,
+                poll_seconds=0,
+                rejected_token="old-token",
+                rejected_uid="same-user",
+            )
+
+        self.assertEqual(result, "duplicate_account")
+
+    def test_codebuddy_account_switch_ignores_token_refresh_before_auth_signal(self):
+        process = mock.Mock()
+        process.poll.return_value = None
+        with tempfile.TemporaryDirectory() as directory, \
+                mock.patch.object(
+                    checkin_cli, "_workbuddy_token_ready", return_value=False,
+                ), mock.patch.object(
+                    checkin_cli, "_capture_current_login",
+                    return_value=("refreshed-token", "same-user"),
+                ):
+            result = checkin_cli._wait_for_codebuddy_login(
+                process,
+                str(pathlib.Path(directory) / "auth-success"),
+                timeout_seconds=0.01,
+                poll_seconds=0,
+                rejected_token="old-token",
+                rejected_uid="same-user",
+            )
+
+        self.assertFalse(result)
+
+    def test_codebuddy_account_switch_accepts_new_official_uid_without_hook(self):
+        process = mock.Mock()
+        process.poll.return_value = None
+        with tempfile.TemporaryDirectory() as directory, \
+                mock.patch.object(
+                    checkin_cli, "_workbuddy_auth_state_marker",
+                    return_value=(("auth-file", "new-user", "auth-time"),),
+                ), mock.patch.object(
+                    checkin_cli, "_capture_current_login",
+                    return_value=("new-token", "new-user"),
+                ), mock.patch.object(
+                    checkin_cli, "_workbuddy_token_ready", return_value=False,
+                ):
+            result = checkin_cli._wait_for_codebuddy_login(
+                process,
+                str(pathlib.Path(directory) / "auth-success"),
+                timeout_seconds=0.01,
+                poll_seconds=0,
+                rejected_token="old-token",
+                rejected_uid="old-user",
+            )
+
+        self.assertTrue(result)
 
     def test_codebuddy_login_waits_for_browser_auth_after_clean_cli_exit(self):
         process = mock.Mock()
@@ -407,21 +515,237 @@ class EnvironmentPreflightTest(unittest.TestCase):
         self.assertTrue(result)
         sleep.assert_called()
 
-    def test_macos_codebuddy_login_uses_automatic_menu(self):
+    def test_token_ready_rejects_current_uid_when_switching_accounts(self):
+        self.assertIn(
+            "rejected_uid",
+            inspect.signature(checkin_cli._workbuddy_token_ready).parameters,
+        )
+        with mock.patch.dict(
+                    sys.modules, {"workbuddy_checkin": worker},
+                ), mock.patch.object(
+                    worker, "extract_current_token",
+                    return_value=("token", "first-user-uid"),
+                ):
+            ready = checkin_cli._workbuddy_token_ready(
+                rejected_uid="first-user-uid",
+            )
+
+        self.assertFalse(ready)
+
+    def test_workbuddy_login_with_same_uid_but_refreshed_token_reports_duplicate(self):
+        with mock.patch.object(
+                    checkin_cli, "_workbuddy_token_ready", return_value=False,
+                ), mock.patch.object(
+                    checkin_cli, "_capture_current_login",
+                    return_value=("refreshed-token", "same-user"),
+                ):
+            result = checkin_cli._wait_for_workbuddy_token(
+                timeout_seconds=1,
+                poll_seconds=0,
+                rejected_uid="same-user",
+                rejected_token="old-token",
+            )
+
+        self.assertEqual(
+            result, checkin_cli.CODEBUDDY_LOGIN_DUPLICATE_ACCOUNT,
+        )
+
+    def test_workbuddy_same_uid_auth_state_change_reports_duplicate(self):
+        with mock.patch.object(
+                    checkin_cli, "_workbuddy_token_ready", return_value=False,
+                ), mock.patch.object(
+                    checkin_cli, "_capture_current_login",
+                    return_value=("same-token", "same-user"),
+                ), mock.patch.object(
+                    checkin_cli, "_workbuddy_auth_state_marker",
+                    return_value=("after",),
+                ):
+            result = checkin_cli._wait_for_workbuddy_token(
+                timeout_seconds=1,
+                poll_seconds=0,
+                rejected_uid="same-user",
+                rejected_token="same-token",
+                initial_auth_marker=("before",),
+            )
+
+        self.assertEqual(
+            result, checkin_cli.CODEBUDDY_LOGIN_DUPLICATE_ACCOUNT,
+        )
+
+    def test_workbuddy_token_refresh_without_new_auth_time_keeps_waiting(self):
+        with mock.patch.object(
+                    checkin_cli, "_workbuddy_token_ready", return_value=False,
+                ), mock.patch.object(
+                    checkin_cli, "_capture_current_login",
+                    return_value=("refreshed-token", "same-user"),
+                ), mock.patch.object(
+                    checkin_cli, "_workbuddy_auth_state_marker",
+                    return_value=("same-user", "auth-time-1"),
+                ):
+            result = checkin_cli._wait_for_workbuddy_token(
+                timeout_seconds=0.01,
+                poll_seconds=0,
+                rejected_uid="same-user",
+                rejected_token="old-token",
+                initial_auth_marker=("same-user", "auth-time-1"),
+            )
+
+        self.assertFalse(result)
+
+    def test_workbuddy_logout_intermediate_state_keeps_waiting(self):
+        with mock.patch.object(
+                    checkin_cli, "_workbuddy_token_ready", return_value=False,
+                ), mock.patch.object(
+                    checkin_cli, "_capture_current_login",
+                    return_value=("historical-token", "same-user"),
+                ), mock.patch.object(
+                    checkin_cli, "_workbuddy_auth_state_marker",
+                    return_value=(),
+                ):
+            result = checkin_cli._wait_for_workbuddy_token(
+                timeout_seconds=0.01,
+                poll_seconds=0,
+                rejected_uid="same-user",
+                rejected_token="old-token",
+                initial_auth_marker=("same-user", "auth-time-1"),
+            )
+
+        self.assertFalse(result)
+
+    def test_workbuddy_logout_then_same_account_reports_duplicate(self):
+        calls = 0
+
+        def auth_marker():
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return ()
+            return ("same-user", "auth-time-1")
+
+        with mock.patch.object(
+                    checkin_cli, "_workbuddy_token_ready", return_value=False,
+                ), mock.patch.object(
+                    checkin_cli, "_capture_current_login",
+                    return_value=("new-token", "same-user"),
+                ), mock.patch.object(
+                    checkin_cli, "_workbuddy_auth_state_marker",
+                    side_effect=auth_marker,
+                ):
+            result = checkin_cli._wait_for_workbuddy_token(
+                timeout_seconds=0.01,
+                poll_seconds=0,
+                rejected_uid="same-user",
+                rejected_token="old-token",
+                initial_auth_marker=("same-user", "auth-time-1"),
+            )
+
+        self.assertEqual(
+            result, checkin_cli.CODEBUDDY_LOGIN_DUPLICATE_ACCOUNT,
+        )
+
+    def test_workbuddy_auth_marker_ignores_startup_file_mtime_only(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            auth_path = pathlib.Path(temp_dir) / "workbuddy-desktop.info"
+            auth_path.write_text(json.dumps({
+                "account": {"uid": "same-user"},
+                "auth": {
+                    "accessToken": "same-token",
+                    "lastRefreshTime": "refresh-1",
+                    "expiresAt": "expires-1",
+                },
+            }), encoding="utf-8")
+            with mock.patch.object(
+                        worker, "_codebuddy_auth_paths",
+                        return_value=(str(auth_path),),
+                    ), mock.patch("importlib.import_module", return_value=worker):
+                before = checkin_cli._workbuddy_auth_state_marker()
+                os.utime(auth_path, (time.time() + 2, time.time() + 2))
+                after = checkin_cli._workbuddy_auth_state_marker()
+
+        self.assertEqual(before, after)
+
+    def test_codebuddy_login_forwards_rejected_uid_to_waiter(self):
+        self.assertIn(
+            "rejected_uid",
+            inspect.signature(
+                checkin_cli._launch_codebuddy_login_and_wait,
+            ).parameters,
+        )
+        process = mock.Mock()
+        platform = mock.Mock()
+
+        def login_codebuddy(**kwargs):
+            return kwargs["wait_for_login"](process, kwargs["signal_path"])
+
+        platform.login_codebuddy.side_effect = login_codebuddy
+        with mock.patch.object(
+                    checkin_cli, "_platform_adapter", return_value=platform,
+                ), mock.patch.object(
+                    checkin_cli, "_wait_for_codebuddy_login", return_value=True,
+                ) as wait, redirect_stdout(StringIO()):
+            result = checkin_cli._launch_codebuddy_login_and_wait(
+                "/usr/local/bin/codebuddy",
+                rejected_uid="first-user-uid",
+            )
+
+        self.assertTrue(result)
+        wait.assert_called_once_with(
+            process,
+            mock.ANY,
+            expected_uid=None,
+            rejected_token=None,
+            rejected_uid="first-user-uid",
+        )
+
+    def test_codebuddy_login_reports_duplicate_account_after_browser_auth(self):
+        platform = mock.Mock()
+        platform.login_codebuddy.return_value = "duplicate_account"
+        output = StringIO()
+        with mock.patch.object(
+                    checkin_cli, "_platform_adapter", return_value=platform,
+                ), redirect_stdout(output):
+            result = checkin_cli._launch_codebuddy_login_and_wait(
+                "/usr/local/bin/codebuddy",
+                rejected_uid="same-user",
+            )
+
+        self.assertEqual(result, "duplicate_account")
+        self.assertIn("该登录账号已经绑定", output.getvalue())
+
+    def test_macos_codebuddy_login_uses_local_auth_api_for_account_switch(self):
+        responses = [
+            self._JsonResponse({
+                "data": {
+                    "authenticated": True,
+                    "account": {"userId": "old-user"},
+                },
+            }),
+            self._JsonResponse({"data": {"success": True}}),
+            self._JsonResponse({"data": {"success": True}}),
+        ]
         process = mock.Mock()
         process.pid = 4242
         process.poll.return_value = None
+        socket_context = mock.MagicMock()
+        socket_context.__enter__.return_value.getsockname.return_value = (
+            "127.0.0.1", 54321,
+        )
         with mock.patch.object(checkin_cli.sys, "platform", "darwin"), \
                 mock.patch.object(
-                    checkin_cli.shutil, "which", return_value="/usr/bin/expect",
+                    socket, "socket", return_value=socket_context,
                 ), \
                 mock.patch.object(
                     checkin_cli.subprocess, "Popen", return_value=process,
                 ) as popen, \
                 mock.patch.object(
+                    checkin_cli.urllib.request,
+                    "urlopen",
+                    side_effect=responses,
+                ) as urlopen, \
+                mock.patch.object(
                     checkin_cli, "_wait_for_codebuddy_login", return_value=True,
-                ), \
-                mock.patch.object(checkin_cli.os, "killpg") as killpg, \
+                ) as wait_for_login, \
+                mock.patch.object(checkin_cli.time, "sleep") as sleep, \
                 redirect_stdout(StringIO()):
             result = checkin_cli._launch_codebuddy_login_and_wait(
                 "/usr/local/bin/codebuddy"
@@ -429,38 +753,73 @@ class EnvironmentPreflightTest(unittest.TestCase):
 
         self.assertTrue(result)
         command = popen.call_args.args[0]
-        self.assertEqual(command[0], "/usr/bin/expect")
-        expect_script = command[2]
-        self.assertIn('send -- "\\r"', expect_script)
-        self.assertIn("Select login method", expect_script)
-        self.assertIn("Enter to login", expect_script)
-        self.assertIn("exp_continue", expect_script)
-        self.assertEqual(expect_script.count('send -- "\\r"'), 1)
-        self.assertNotIn('send -s -- "/login"', expect_script)
-        self.assertNotIn(
-            "Switch Tencent Cloud CodeBuddy accounts", expect_script,
-        )
-        self.assertNotIn("/usr/bin/pbpaste", expect_script)
-        self.assertNotIn("/usr/bin/open", expect_script)
-        self.assertNotIn("spawn -noecho --", expect_script)
-        self.assertLess(
-            expect_script.index("Enter to login"),
-            expect_script.index('send -- "\\r"'),
-        )
-        self.assertEqual(len(command), 3)
-        self.assertNotIn("--serve", command)
-        self.assertNotIn("--open", command)
-        popen.assert_called_once()
-        child_env = popen.call_args.kwargs["env"]
+        self.assertIn("--serve", command)
+        self.assertIn("--host", command)
+        self.assertIn("127.0.0.1", command)
+        self.assertIn("--port", command)
+        self.assertIn("54321", command)
+        self.assertEqual(len(urlopen.call_args_list), 3)
+        status_request = urlopen.call_args_list[0].args[0]
+        logout_request = urlopen.call_args_list[1].args[0]
+        login_request = urlopen.call_args_list[2].args[0]
+        self.assertEqual(status_request.get_method(), "GET")
+        self.assertEqual(logout_request.get_method(), "POST")
+        self.assertTrue(logout_request.full_url.endswith(
+            "/api/v1/auth/account/logout"
+        ))
+        sleep.assert_any_call(1.0)
+        self.assertEqual(login_request.get_method(), "POST")
         self.assertEqual(
-            child_env["WORKBUDDY_CODEBUDDY_CLI"],
-            "/usr/local/bin/codebuddy",
+            json.loads(login_request.data.decode("utf-8")),
+            {"method": "internal"},
         )
-        self.assertIn("trustAll", child_env["WORKBUDDY_CODEBUDDY_SETTINGS"])
-        self.assertNotIn("stdin", popen.call_args.kwargs)
-        self.assertTrue(popen.call_args.kwargs.get("start_new_session"))
-        killpg.assert_called_once_with(4242, signal.SIGTERM)
-        process.terminate.assert_not_called()
+        wait_for_login.assert_called_once()
+
+    def test_macos_codebuddy_login_clears_initial_auth_signal_before_waiting(self):
+        responses = [
+            self._JsonResponse({
+                "data": {
+                    "authenticated": True,
+                    "account": {"userId": "old-user"},
+                },
+            }),
+            self._JsonResponse({"data": {"success": True}}),
+            self._JsonResponse({"data": {"success": True}}),
+        ]
+        process = mock.Mock()
+        process.poll.return_value = None
+        socket_context = mock.MagicMock()
+        socket_context.__enter__.return_value.getsockname.return_value = (
+            "127.0.0.1", 54321,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            signal_path = pathlib.Path(directory) / "auth-success"
+            signal_path.touch()
+            with mock.patch.object(checkin_cli.sys, "platform", "darwin"), \
+                    mock.patch.object(
+                        socket, "socket", return_value=socket_context,
+                    ), \
+                    mock.patch.object(
+                        checkin_cli.subprocess, "Popen", return_value=process,
+                    ), \
+                    mock.patch.object(
+                        checkin_cli.urllib.request,
+                        "urlopen",
+                        side_effect=responses,
+                    ), \
+                    mock.patch.object(checkin_cli.time, "sleep"):
+                platform = checkin_cli._platform_adapter()
+                result = platform.login_codebuddy(
+                    cli_path="/usr/local/bin/codebuddy",
+                    base_dir=str(pathlib.Path(directory)),
+                    settings="{}",
+                    signal_path=str(signal_path),
+                    wait_for_login=mock.Mock(return_value=True),
+                    run_command=mock.Mock(),
+                )
+
+            self.assertTrue(result)
+            self.assertFalse(signal_path.exists())
 
     def test_windows_codebuddy_login_uses_web_ui_and_opens_auth_url(self):
         responses = [
@@ -553,9 +912,6 @@ class EnvironmentPreflightTest(unittest.TestCase):
             self._JsonResponse({
                 "data": {
                     "authenticated": False,
-                    "loginMethods": [
-                        {"id": "internal", "label": "国内站点登录"},
-                    ],
                 },
             }),
             self._JsonResponse({"data": {"success": True}}),
@@ -597,6 +953,61 @@ class EnvironmentPreflightTest(unittest.TestCase):
         self.assertTrue(result)
         wait_for_login.assert_called_once()
         startfile.assert_not_called()
+
+    def test_windows_codebuddy_login_matches_macos_logout_sequence(self):
+        responses = [
+            self._JsonResponse({
+                "data": {
+                    "authenticated": True,
+                    "account": {"userId": "old-user"},
+                },
+            }),
+            self._JsonResponse({"data": {"success": True}}),
+            self._JsonResponse({"data": {"success": True}}),
+        ]
+        process = mock.Mock()
+        process.pid = 4242
+        process.poll.return_value = None
+        socket_context = mock.MagicMock()
+        socket_context.__enter__.return_value.getsockname.return_value = (
+            "127.0.0.1", 54321,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            signal_path = pathlib.Path(directory) / "auth-success"
+            signal_path.touch()
+            with mock.patch.object(checkin_cli.sys, "platform", "win32"), \
+                    mock.patch.object(
+                        socket, "socket", return_value=socket_context,
+                    ), mock.patch.object(
+                        checkin_cli.subprocess, "Popen", return_value=process,
+                    ), mock.patch.object(
+                        checkin_cli.urllib.request, "urlopen",
+                        side_effect=responses,
+                    ) as urlopen, mock.patch.object(
+                        checkin_cli, "_wait_for_codebuddy_login",
+                        return_value=True,
+                    ), mock.patch.object(
+                        checkin_cli, "_run", return_value=(0, "", ""),
+                    ), mock.patch.object(
+                        checkin_cli.time, "sleep",
+                    ) as sleep, redirect_stdout(StringIO()):
+                result = checkin_cli._launch_codebuddy_login_and_wait(
+                    "C:\\CodeBuddy\\codebuddy.cmd",
+                    rejected_uid="old-user",
+                )
+
+        self.assertTrue(result)
+        self.assertEqual(len(urlopen.call_args_list), 3)
+        logout_request = urlopen.call_args_list[1].args[0]
+        login_request = urlopen.call_args_list[2].args[0]
+        self.assertTrue(logout_request.full_url.endswith(
+            "/api/v1/auth/account/logout"
+        ))
+        self.assertTrue(login_request.full_url.endswith(
+            "/api/v1/auth/account/login"
+        ))
+        sleep.assert_any_call(1.0)
+        self.assertFalse(signal_path.exists())
 
     def test_main_handles_ctrl_c_without_traceback(self):
         output = StringIO()
@@ -723,7 +1134,10 @@ class EnvironmentPreflightTest(unittest.TestCase):
                 ) as launch, \
                 mock.patch.object(
                     checkin_cli, "_wait_for_workbuddy_token", return_value=True,
-                ) as wait, redirect_stdout(StringIO()):
+                ) as wait, \
+                mock.patch.object(checkin_cli, "read_config", return_value={}), \
+                mock.patch.object(checkin_cli, "write_config"), \
+                redirect_stdout(StringIO()):
             result = checkin_cli.cmd_reauth(args)
 
         self.assertEqual(result, 0)
@@ -739,7 +1153,10 @@ class EnvironmentPreflightTest(unittest.TestCase):
                 mock.patch.object(
                     checkin_cli, "_launch_codebuddy_login_and_wait",
                     return_value=True,
-                ) as login, redirect_stdout(StringIO()):
+                ) as login, \
+                mock.patch.object(checkin_cli, "read_config", return_value={}), \
+                mock.patch.object(checkin_cli, "write_config"), \
+                redirect_stdout(StringIO()):
             result = checkin_cli.cmd_reauth(args)
 
         self.assertEqual(result, 0)
@@ -858,14 +1275,16 @@ class PurgeUninstallTest(unittest.TestCase):
         args = checkin_cli.argparse.Namespace(
             purge=True, purge_codebuddy=True, yes=False,
         )
+        output = StringIO()
         with mock.patch("builtins.input", return_value="n"), \
                 mock.patch.object(checkin_cli, "uninstall") as uninstall, \
                 mock.patch.object(checkin_cli, "_purge_paths") as purge_paths, \
                 mock.patch.object(checkin_cli, "_purge_codebuddy") as purge_codebuddy, \
-                redirect_stdout(StringIO()):
+                redirect_stdout(output):
             result = checkin_cli.cmd_uninstall(args)
 
         self.assertEqual(result, 1)
+        self.assertIn("退出正在运行的 WorkBuddy", output.getvalue())
         uninstall.assert_not_called()
         purge_paths.assert_not_called()
         purge_codebuddy.assert_not_called()
@@ -874,6 +1293,7 @@ class PurgeUninstallTest(unittest.TestCase):
         args = checkin_cli.argparse.Namespace(
             purge=True, purge_codebuddy=True, yes=True,
         )
+        output = StringIO()
         with mock.patch.object(
                     checkin_cli, "uninstall", return_value=(True, "removed"),
                 ), \
@@ -883,10 +1303,11 @@ class PurgeUninstallTest(unittest.TestCase):
                 mock.patch.object(
                     checkin_cli, "_purge_codebuddy", return_value=(["cli"], []),
                 ) as purge_codebuddy, \
-                redirect_stdout(StringIO()):
+                redirect_stdout(output):
             result = checkin_cli.cmd_uninstall(args)
 
         self.assertEqual(result, 0)
+        self.assertIn("退出正在运行的 WorkBuddy", output.getvalue())
         purge_codebuddy.assert_called_once_with()
 
     def test_codebuddy_purge_targets_include_cli_config_and_shared_login(self):
@@ -913,6 +1334,54 @@ class PurgeUninstallTest(unittest.TestCase):
             ),
             targets,
         )
+        self.assertIn(
+            checkin_cli.os.path.expanduser("~/.workbuddy/logs"), targets,
+        )
+
+    def test_codebuddy_purge_stops_shared_clients_before_deleting_login_sources(self):
+        events = []
+        platform = mock.Mock()
+        platform.codebuddy_purge_paths.return_value = []
+        platform.stop_shared_login_processes.side_effect = (
+            lambda run: events.append("stop")
+        )
+
+        def purge_paths(_paths):
+            events.append("purge")
+            return [], []
+
+        with mock.patch.object(
+                    checkin_cli, "_platform_adapter", return_value=platform,
+                ), mock.patch.object(
+                    checkin_cli, "_find_codebuddy_cli", return_value="",
+                ), mock.patch.object(
+                    checkin_cli, "_find_npm_cli", return_value="",
+                ), mock.patch.object(
+                    checkin_cli, "_purge_paths", side_effect=purge_paths,
+                ), mock.patch.object(
+                    checkin_cli, "_workbuddy_token_ready", return_value=False,
+                ):
+            checkin_cli._purge_codebuddy()
+
+        self.assertEqual(events, ["stop", "purge"])
+
+    def test_codebuddy_purge_reports_failure_when_login_token_survives(self):
+        platform = mock.Mock()
+        platform.codebuddy_purge_paths.return_value = []
+        with mock.patch.object(
+                    checkin_cli, "_platform_adapter", return_value=platform,
+                ), mock.patch.object(
+                    checkin_cli, "_find_codebuddy_cli", return_value="",
+                ), mock.patch.object(
+                    checkin_cli, "_find_npm_cli", return_value="",
+                ), mock.patch.object(
+                    checkin_cli, "_purge_paths", return_value=([], []),
+                ), mock.patch.object(
+                    checkin_cli, "_workbuddy_token_ready", return_value=True,
+                ):
+            _, failures = checkin_cli._purge_codebuddy()
+
+        self.assertTrue(any("有效登录态" in item for item in failures))
 
     def test_codebuddy_purge_rejects_unsafe_custom_config_directory(self):
         with mock.patch.dict(
@@ -954,6 +1423,8 @@ class PurgeUninstallTest(unittest.TestCase):
                 ) as run, \
                 mock.patch.object(
                     checkin_cli, "_purge_paths", return_value=([], []),
+                ), mock.patch.object(
+                    checkin_cli, "_workbuddy_token_ready", return_value=False,
                 ):
             removed, failures = checkin_cli._purge_codebuddy()
 
@@ -1050,6 +1521,9 @@ class PurgeUninstallTest(unittest.TestCase):
         )
         self.assertNotIn(checkin_cli.WORKER, targets)
         self.assertNotIn(str(MODULE_PATH), targets)
+        self.assertNotIn(
+            checkin_cli.os.path.expanduser("~/.workbuddy/logs"), targets,
+        )
 
     def test_status_after_purge_reports_absent_configuration_not_defaults(self):
         with tempfile.TemporaryDirectory() as directory:

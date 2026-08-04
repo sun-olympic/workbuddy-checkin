@@ -2328,7 +2328,40 @@ def cmd_account_add(args):
             accounts, requested_name, excluded_index=requested_index):
         print(f"❌ 别名 {requested_name} 已被其他账户使用。")
         return 1
+    has_legacy_wizard_login = bool(
+        cfg.get("_auth_mode") or cfg.get("_auth_executable")
+    )
+    legacy_login_recovered = False
     current_login = _capture_current_login()
+    if current_login and not accounts:
+        # 账户列表为空时，account add 的语义是绑定当前登录账号；
+        # 不要因为残留的旧版配置再次生成“默认账号”并触发切换等待。
+        legacy_login_recovered = True
+    if not current_login and not accounts and has_legacy_wizard_login:
+        mode, executable = _account_mode_and_executable(
+            cfg, {}, getattr(args, "auth_mode", "auto"),
+        )
+        if (cfg.get("_auth_mode") or "auto") == mode:
+            executable = cfg.get("_auth_executable") or executable
+        if mode == "workbuddy":
+            executable = executable or _find_workbuddy_app()
+            initial_auth_marker = _workbuddy_auth_state_marker()
+            ready = bool(
+                executable
+                and _launch_workbuddy_app(executable)
+                and _wait_for_workbuddy_token(
+                    initial_auth_marker=initial_auth_marker,
+                )
+            )
+        else:
+            executable = executable or _ensure_codebuddy_cli()
+            ready = bool(
+                executable
+                and _launch_codebuddy_login_and_wait(executable)
+            )
+        if ready:
+            current_login = _capture_current_login()
+            legacy_login_recovered = bool(current_login)
     if not current_login and accounts and not requested_account_id:
         previous_account = next((
             item for item in accounts if isinstance(item, dict)
@@ -2346,10 +2379,8 @@ def cmd_account_add(args):
         return 1
     token, uid = current_login
     legacy_account_migrated = False
-    has_legacy_wizard_login = bool(
-        cfg.get("_auth_mode") or cfg.get("_auth_executable")
-    )
-    if not accounts and not requested_account_id and has_legacy_wizard_login:
+    if (not accounts and not requested_account_id
+            and has_legacy_wizard_login and not legacy_login_recovered):
         _, legacy_account_migrated = _ensure_current_login_account(
             cfg, current_login, getattr(args, "auth_mode", "auto"),
         )
@@ -2471,6 +2502,9 @@ def cmd_account_remove(args):
     accounts = list(cfg.get("accounts") or [])
     removed = accounts.pop(index)
     cfg["accounts"] = accounts
+    if not accounts:
+        cfg.pop("_auth_mode", None)
+        cfg.pop("_auth_executable", None)
     write_config(cfg)
     print(f"✅ 已删除账户配置：{removed.get('name') or args.account_id}")
     return 0

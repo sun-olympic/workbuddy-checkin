@@ -517,9 +517,8 @@ class AccountCommandTest(unittest.TestCase):
         self.assertEqual(account["auth"]["token"], "wizard-token")
         self.assertEqual(account["auth"]["mode"], "workbuddy")
 
-    def test_first_account_add_migrates_legacy_wizard_user_before_switching(self):
+    def test_first_account_add_binds_current_legacy_login(self):
         first_uid = "legacy-wizard-uid"
-        second_uid = "second-user-uid"
         existing = {
             "_auth_mode": "workbuddy",
             "_auth_executable": "/Applications/WorkBuddy.app",
@@ -533,28 +532,19 @@ class AccountCommandTest(unittest.TestCase):
         with mock.patch.object(cli, "read_config", return_value=existing), \
                 mock.patch.object(
                     cli, "_capture_current_login",
-                    side_effect=[
-                        ("legacy-token", first_uid),
-                        ("second-token", second_uid),
-                    ],
+                    return_value=("legacy-token", first_uid),
                 ), mock.patch.object(
                     cli, "_find_workbuddy_app",
                     return_value="/Applications/WorkBuddy.app",
-                ), mock.patch.object(
-                    cli, "_launch_workbuddy_app", return_value=True,
-                ), mock.patch.object(
-                    cli, "_wait_for_workbuddy_token", return_value=True,
                 ), mock.patch.object(cli, "write_config") as write_config, \
                 redirect_stdout(StringIO()):
             result = cli.cmd_account_add(args)
 
         self.assertEqual(result, 0)
         saved = write_config.call_args.args[0]
-        self.assertEqual(len(saved["accounts"]), 2)
-        self.assertEqual(saved["accounts"][0]["name"], "默认账号")
+        self.assertEqual(len(saved["accounts"]), 1)
+        self.assertEqual(saved["accounts"][0]["name"], "Second")
         self.assertEqual(saved["accounts"][0]["auth"]["uid"], first_uid)
-        self.assertEqual(saved["accounts"][1]["name"], "Second")
-        self.assertEqual(saved["accounts"][1]["auth"]["uid"], second_uid)
 
     def test_account_add_without_id_guides_switch_when_current_user_exists(self):
         first_uid = "first-user-uid"
@@ -656,6 +646,68 @@ class AccountCommandTest(unittest.TestCase):
         saved = write_config.call_args.args[0]
         self.assertEqual(len(saved["accounts"]), 2)
         self.assertEqual(saved["accounts"][1]["auth"]["uid"], second_uid)
+
+    def test_account_add_recovers_legacy_login_when_local_session_is_missing(self):
+        existing = {
+            "_auth_mode": "codebuddy_cli",
+            "_auth_executable": "/usr/local/bin/codebuddy",
+        }
+        args = cli.argparse.Namespace(
+            account_id=None,
+            name="19525468534",
+            auth_mode="codebuddy_cli",
+            replace=False,
+        )
+        with mock.patch.object(cli, "read_config", return_value=existing), \
+                mock.patch.object(
+                    cli, "_capture_current_login",
+                    side_effect=[None, ("new-token", "new-user-uid")],
+                ), mock.patch.object(
+                    cli, "_launch_codebuddy_login_and_wait",
+                    return_value=True,
+                ) as login, mock.patch.object(
+                    cli, "write_config",
+                ) as write_config, redirect_stdout(StringIO()):
+            result = cli.cmd_account_add(args)
+
+        self.assertEqual(result, 0)
+        login.assert_called_once_with("/usr/local/bin/codebuddy")
+        saved = write_config.call_args.args[0]
+        self.assertEqual(saved["accounts"][0]["name"], "19525468534")
+        self.assertEqual(
+            saved["accounts"][0]["auth"]["uid"], "new-user-uid",
+        )
+
+    def test_account_add_binds_current_login_when_legacy_accounts_are_empty(self):
+        existing = {
+            "_auth_mode": "codebuddy_cli",
+            "_auth_executable": "/usr/local/bin/codebuddy",
+        }
+        args = cli.argparse.Namespace(
+            account_id=None,
+            name="19525468534",
+            auth_mode="codebuddy_cli",
+            replace=False,
+        )
+        with mock.patch.object(cli, "read_config", return_value=existing), \
+                mock.patch.object(
+                    cli, "_capture_current_login",
+                    return_value=("current-token", "current-user-uid"),
+                ), mock.patch.object(
+                    cli, "_capture_different_account_login",
+                    return_value=None,
+                ) as switch_login, mock.patch.object(
+                    cli, "write_config",
+                ) as write_config:
+            result = cli.cmd_account_add(args)
+
+        self.assertEqual(result, 0)
+        switch_login.assert_not_called()
+        saved = write_config.call_args.args[0]
+        self.assertEqual(saved["accounts"][0]["name"], "19525468534")
+        self.assertEqual(
+            saved["accounts"][0]["auth"]["uid"], "current-user-uid",
+        )
 
     def test_account_add_switch_timeout_does_not_change_configuration(self):
         first_uid = "first-user-uid"
@@ -902,6 +954,28 @@ class AccountCommandTest(unittest.TestCase):
         self.assertEqual(result, 0)
         saved = write_config.call_args.args[0]
         self.assertEqual([item["id"] for item in saved["accounts"]], ["bob"])
+
+    def test_account_remove_last_account_clears_legacy_login_settings(self):
+        existing = {
+            "_auth_mode": "codebuddy_cli",
+            "_auth_executable": "/usr/local/bin/codebuddy",
+            "accounts": [{
+                "id": "alice",
+                "name": "Alice",
+                "auth": {"uid": "alice-uid", "token": "secret"},
+            }],
+        }
+        args = cli.argparse.Namespace(account_id="alice")
+        with mock.patch.object(
+                    cli, "read_config", return_value=existing,
+                ), mock.patch.object(cli, "write_config") as write_config:
+            result = cli.cmd_account_remove(args)
+
+        self.assertEqual(result, 0)
+        saved = write_config.call_args.args[0]
+        self.assertEqual(saved["accounts"], [])
+        self.assertNotIn("_auth_mode", saved)
+        self.assertNotIn("_auth_executable", saved)
 
     def test_account_login_waits_for_matching_user_and_updates_only_that_account(self):
         existing = {

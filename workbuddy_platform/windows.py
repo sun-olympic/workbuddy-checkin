@@ -1,5 +1,4 @@
 import base64
-import json
 import ntpath
 import os
 import shutil
@@ -8,9 +7,9 @@ import subprocess
 import socket
 import sys
 import time
-import urllib.error
-import urllib.request
 import webbrowser
+
+from .common import run_codebuddy_auth_flow
 
 
 class WindowsPlatform:
@@ -241,8 +240,27 @@ class WindowsPlatform:
         return paths
 
     def launch_workbuddy_app(self, app_path):
+        install_dir = ntpath.dirname(app_path)
+        required_resources = (
+            "resources.pak",
+            "chrome_100_percent.pak",
+        )
+        missing_resources = [
+            name for name in required_resources
+            if not os.path.isfile(ntpath.join(install_dir, name))
+        ]
+        if missing_resources:
+            print(
+                "❌ WorkBuddy 安装文件不完整，缺少：{}。"
+                .format(", ".join(missing_resources))
+            )
+            print(
+                "   请重新安装 WorkBuddy，或使用 "
+                "--auth-mode codebuddy_cli 完成登录。"
+            )
+            return False
         try:
-            subprocess.Popen([app_path])
+            subprocess.Popen([app_path], cwd=install_dir)
             return True
         except OSError:
             return False
@@ -315,6 +333,10 @@ class WindowsPlatform:
         paths.extend(self.codebuddy_auth_paths(filenames))
         return paths
 
+    def stop_shared_login_processes(self, run):
+        """彻底清理登录态前停止仍可能写回 Token 的 WorkBuddy。"""
+        run(["taskkill", "/F", "/T", "/IM", "WorkBuddy.exe"])
+
     def retry_readonly_removal(self, function, path, error):
         if (isinstance(error, PermissionError)
                 or getattr(error, "winerror", None) == 5):
@@ -337,55 +359,16 @@ class WindowsPlatform:
             ], cwd=base_dir, stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-            status = None
-            deadline = time.monotonic() + 15
-            while time.monotonic() < deadline:
-                try:
-                    request = urllib.request.Request(
-                        base_url + "/api/v1/auth/account/status",
-                        headers={"x-codebuddy-request": "1"}, method="GET",
-                    )
-                    with urllib.request.urlopen(request, timeout=2) as response:
-                        payload = json.loads(response.read().decode("utf-8"))
-                    status = payload.get("data", payload)
-                    break
-                except (OSError, ValueError, urllib.error.URLError):
-                    if process.poll() not in (None, 0):
-                        break
-                    time.sleep(0.25)
-
-            login_methods = (status or {}).get("loginMethods") or []
-            method_ids = {item.get("id") for item in login_methods}
-            if "internal" not in method_ids:
-                raise RuntimeError(
-                    "CodeBuddy 登录服务未返回国内站登录入口，请重试。"
-                )
-
-            request = urllib.request.Request(
-                base_url + "/api/v1/auth/account/login",
-                data=json.dumps({"method": "internal"}).encode("utf-8"),
-                headers={
-                    "x-codebuddy-request": "1",
-                    "Content-Type": "application/json",
-                },
-                method="POST",
-            )
-            with urllib.request.urlopen(request, timeout=5) as response:
-                payload = json.loads(response.read().decode("utf-8"))
-            login_data = payload.get("data", payload)
-            if not login_data.get("success"):
-                raise RuntimeError("CodeBuddy 未能启动浏览器登录，请重试。")
-
-            auth_url = login_data.get("authUrl", "")
-            if auth_url:
+            def open_auth_url(auth_url):
                 try:
                     os.startfile(auth_url)
                 except OSError:
                     webbrowser.open(auth_url)
-                print("🌐 已打开 CodeBuddy 国内站登录页，请在浏览器完成授权。")
-            else:
-                print("🌐 CodeBuddy 已触发国内站登录，请在浏览器完成授权。")
-            return wait_for_login(process, signal_path)
+
+            return run_codebuddy_auth_flow(
+                base_url, process, signal_path, wait_for_login,
+                open_auth_url,
+            )
         finally:
             if process is not None:
                 if process.poll() is None:

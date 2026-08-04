@@ -430,6 +430,29 @@ class EnvironmentPreflightTest(unittest.TestCase):
 
         self.assertEqual(result, "duplicate_account")
 
+    def test_codebuddy_same_account_after_logout_does_not_need_auth_signal(self):
+        process = mock.Mock()
+        process.poll.side_effect = [None, 1]
+        auth_markers = iter(["", "new-auth-marker", "new-auth-marker"])
+        with tempfile.TemporaryDirectory() as directory, \
+                mock.patch.object(
+                    checkin_cli, "_workbuddy_auth_state_marker",
+                    side_effect=lambda: next(auth_markers),
+                ), mock.patch.object(
+                    checkin_cli, "_capture_current_login",
+                    return_value=("same-token", "same-user"),
+                ), mock.patch.object(checkin_cli.time, "sleep"):
+            result = checkin_cli._wait_for_codebuddy_login(
+                process,
+                str(pathlib.Path(directory) / "auth-success"),
+                timeout_seconds=1,
+                poll_seconds=0,
+                rejected_token="old-token",
+                rejected_uid="same-user",
+            )
+
+        self.assertEqual(result, "duplicate_account")
+
     def test_codebuddy_account_switch_ignores_token_refresh_before_auth_signal(self):
         process = mock.Mock()
         process.poll.return_value = None

@@ -415,6 +415,9 @@ class EnvironmentPreflightTest(unittest.TestCase):
                         checkin_cli, "_workbuddy_token_ready",
                         return_value=False,
                     ), mock.patch.object(
+                        checkin_cli, "_workbuddy_auth_state_marker",
+                        return_value="current-auth-marker",
+                    ), mock.patch.object(
                         checkin_cli, "_capture_current_login",
                         return_value=("old-token", "same-user"),
                     ):

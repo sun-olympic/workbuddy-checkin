@@ -336,14 +336,23 @@ class WindowsPlatform:
     def stop_shared_login_processes(self, run):
         """彻底清理登录态前停止仍可能写回 Token 的 WorkBuddy。"""
         run(["taskkill", "/F", "/T", "/IM", "WorkBuddy.exe"])
+        # ponytail: taskkill /F 是异步的，进程可能还在刷日志缓冲区；
+        # 不等的话 shutil.rmtree 会碰到文件被锁（WinError 5）。
+        time.sleep(2)
 
     def retry_readonly_removal(self, function, path, error):
-        if (isinstance(error, PermissionError)
+        if not (isinstance(error, PermissionError)
                 or getattr(error, "winerror", None) == 5):
-            os.chmod(path, stat.S_IWRITE)
+            return False
+        os.chmod(path, stat.S_IWRITE)
+        try:
             function(path)
             return True
-        return False
+        except PermissionError:
+            # ponytail: 句柄可能被刚杀的进程延迟释放；等一下再试一次。
+            time.sleep(1)
+            function(path)
+            return True
 
     def login_codebuddy(self, cli_path, base_dir, settings, signal_path,
                         wait_for_login, run_command):

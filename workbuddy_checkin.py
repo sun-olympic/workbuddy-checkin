@@ -430,7 +430,8 @@ def _get_wx_test_token(appid, secret, force_refresh=False):
     if not force_refresh:
         try:
             if os.path.exists(WX_TEST_TOKEN_CACHE):
-                c = json.load(open(WX_TEST_TOKEN_CACHE, encoding="utf-8"))
+                with open(WX_TEST_TOKEN_CACHE, encoding="utf-8") as f:
+                    c = json.load(f)
                 if c.get("appid") == appid and time.time() < c.get("expire_at", 0) - 60:
                     return c["access_token"]
         except Exception:
@@ -445,9 +446,9 @@ def _get_wx_test_token(appid, secret, force_refresh=False):
     token = tk["access_token"]
     expires = int(tk.get("expires_in", 7200))
     try:
-        json.dump({"appid": appid, "access_token": token,
-                   "expire_at": time.time() + expires},
-                  open(WX_TEST_TOKEN_CACHE, "w", encoding="utf-8"))
+        with open(WX_TEST_TOKEN_CACHE, "w", encoding="utf-8") as f:
+            json.dump({"appid": appid, "access_token": token,
+                       "expire_at": time.time() + expires}, f)
     except Exception:
         pass
     return token
@@ -729,6 +730,8 @@ def do_checkin(dry_run=False, force=False, cfg=None, _allow_reauth=True,
 
 def classify_message(ok, transient, outcome="checked_in"):
     """生成通知文案。"""
+    if ok and outcome == "dry_run":
+        return "📋 WorkBuddy 签到状态查询完成", "dry-run 模式，仅查询状态，未执行签到"
     if ok and outcome == "already_checked_in":
         return (
             "✅ WorkBuddy 今日已签到",
